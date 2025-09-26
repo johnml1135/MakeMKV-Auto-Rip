@@ -23,6 +23,9 @@ Automatically rips DVDs and Blu-ray discs using the MakeMKV console and saves th
 - **📝 Comprehensive logging** - Optional detailed operation logs with configurable 12hr/24hr console timestamps
 - **⚡ Advanced drive management** - Separate control for loading and ejecting drive preferences
 - **🎛️ Flexible options** - Rip longest title or all titles (that are above MakeMKV min title length)
+- **🔄 HandBrake integration** - Optional post-processing to convert MKV files to more efficient formats
+- **🎯 Compression presets** - Use HandBrake's optimized presets for the perfect balance of quality and size
+- **🗑️ Automatic cleanup** - Optional removal of original MKV files after successful conversion
 
 ## 🚀 Quick Start
 
@@ -251,6 +254,28 @@ mount_detection:
   # Polling interval to check for newly mounted drives (in seconds)
   poll_interval: 1
 
+# HandBrake post-processing settings
+handbrake:
+  # Enable HandBrake post-processing after ripping (true/false)
+  enabled: false
+
+  # Path to HandBrakeCLI executable (OPTIONAL - auto-detected if not specified)
+  # Uncomment and set only if you need to override the automatic detection
+  # cli_path: "C:/Program Files/HandBrake/HandBrakeCLI.exe"
+
+  # Compression preset to use (see HandBrake documentation for available presets)
+  # Common presets: "Fast 1080p30", "HQ 1080p30 Surround", "Super HQ 1080p30 Surround"
+  preset: "Fast 1080p30"
+
+  # Output format (mp4/m4v)
+  output_format: "mp4"
+
+  # Delete original MKV file after successful conversion (true/false)
+  delete_original: false
+
+  # Additional HandBrake CLI arguments (advanced users only)
+  additional_args: ""
+
 # Interface behavior settings
 interface:
   # Enable repeat mode - after ripping, prompt again for another round (true/false)
@@ -292,6 +317,25 @@ makemkv:
   - **Cross-Platform Support**: Works on Windows, macOS, and Linux
   - **Automatic Restoration**: System date automatically restored after ripping operations
   - ⚠️ **Docker Limitation**: Not supported in Docker containers - change host system date manually if needed
+
+- **HandBrake Configuration**:
+  - **`handbrake.enabled`** - Enable/disable HandBrake post-processing (`true` or `false`)
+  - **`handbrake.cli_path`** - Path to HandBrakeCLI executable (auto-detected if not specified)
+    - Supports forward slashes on all platforms
+    - Common locations:
+      - Windows: `"C:/Program Files/HandBrake/HandBrakeCLI.exe"`
+      - Linux: `"/usr/bin/HandBrakeCLI"`
+      - macOS: `"/usr/local/bin/HandBrakeCLI"` or `"/opt/homebrew/bin/HandBrakeCLI"`
+  - **`handbrake.preset`** - HandBrake encoding preset
+    - Common presets:
+      - `"Fast 1080p30"` - Good balance of speed and quality
+      - `"HQ 1080p30 Surround"` - Higher quality, slower encoding
+      - `"Super HQ 1080p30 Surround"` - Best quality, slowest encoding
+    - See [HandBrake documentation](https://handbrake.fr/docs/en/latest/technical/official-presets.html) for more presets
+  - **`handbrake.output_format`** - Output container format (`"mp4"` or `"m4v"`)
+  - **`handbrake.delete_original`** - Delete original MKV after successful conversion (`true` or `false`)
+  - **`handbrake.additional_args`** - Additional HandBrakeCLI arguments for advanced users
+    - Example: `"--audio-lang-list eng --all-audio"`
 
 **Important Notes:**
 

@@ -20,12 +20,33 @@ export const LOG_LEVELS = Object.freeze({
   WARNING: "warning",
 });
 
-export const VALIDATION_CONSTANTS = Object.freeze({
+export const VALIDATION_CONSTANTS = {
   DRIVE_FILTER: "DRV:",
   MEDIA_PRESENT: 2,
   TITLE_LENGTH_CODE: 9,
   COPY_COMPLETE_MSG: "MSG:5036",
-});
+  MINIMUM_TITLE_LENGTH: 120, // seconds
+};
+
+export const HANDBRAKE_CONSTANTS = {
+  SUPPORTED_FORMATS: ["mp4", "m4v"],
+  DEFAULT_PRESET: "Fast 1080p30",
+  MIN_FILE_SIZE_MB: 10, // Minimum reasonable output size
+  MAX_TIMEOUT_HOURS: 12, // Maximum conversion timeout
+  MIN_TIMEOUT_HOURS: 2, // Minimum conversion timeout
+  PROGRESS_CHECK_INTERVAL: 30000, // 30 seconds
+  COMMON_PRESETS: [
+    "Fast 1080p30",
+    "HQ 1080p30 Surround",
+    "Super HQ 1080p30 Surround",
+    "Fast 720p30",
+    "Fast 480p30"
+  ],
+  FILE_HEADERS: {
+    MP4: "66747970", // 'ftyp' in hex
+    M4V: "66747970"  // Same as MP4
+  }
+};
 
 export const MENU_OPTIONS = Object.freeze({
   RIP: "1",

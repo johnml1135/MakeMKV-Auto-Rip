@@ -1,9 +1,11 @@
 import { readFileSync } from "fs";
+import fs from "fs";
 import { dirname, join, resolve, normalize, sep } from "path";
 import { fileURLToPath } from "url";
 import { parse } from "yaml";
 import { FileSystemUtils } from "../utils/filesystem.js";
 import { Logger } from "../utils/logger.js";
+import { validateHandBrakeConfig, mergeHandBrakeConfig } from "../utils/handbrake-config.js";
 
 // Get the current file's directory
 const __filename = fileURLToPath(import.meta.url);
@@ -154,6 +156,41 @@ export class AppConfig {
    * Get the fake date for MakeMKV operations
    * @returns {string|null} - Fake date string or null if not set
    */
+  /**
+   * Get HandBrake configuration object
+   * @returns {Object} HandBrake configuration
+   */
+  static get handbrake() {
+    const config = this.#loadConfig();
+    if (!config.handbrake) {
+      return {
+        enabled: false,
+        cli_path: null,
+        preset: "Fast 1080p30",
+        output_format: "mp4",
+        delete_original: false,
+        additional_args: ""
+      };
+    }
+
+    return {
+      enabled: Boolean(config.handbrake.enabled),
+      cli_path: config.handbrake.cli_path || null,
+      preset: config.handbrake.preset || "Fast 1080p30",
+      output_format: (config.handbrake.output_format || "mp4").toLowerCase(),
+      delete_original: Boolean(config.handbrake.delete_original),
+      additional_args: config.handbrake.additional_args || ""
+    };
+  }
+
+  /**
+   * Check if HandBrake post-processing is enabled
+   * @returns {boolean}
+   */
+  static get isHandBrakeEnabled() {
+    return Boolean(this.handbrake.enabled);
+  }
+
   static get makeMKVFakeDate() {
     const config = this.#loadConfig();
     const fakeDate = config.makemkv?.fake_date;
@@ -202,6 +239,44 @@ export class AppConfig {
       throw new Error(
         `Missing required configuration paths. Please check your config.yaml file.`
       );
+    }
+
+    // Load and validate HandBrake configuration
+    const config = this.#loadConfig();
+    Logger.info("Checking HandBrake configuration...");
+    if (config.handbrake?.enabled) {
+      Logger.info("HandBrake post-processing is enabled");
+      const handbrakeConfig = this.handbrake;
+
+      // Validate output format
+      if (!['mp4', 'm4v'].includes(handbrakeConfig.output_format.toLowerCase())) {
+        throw new Error(
+          `Invalid HandBrake output format: ${handbrakeConfig.output_format}. Must be 'mp4' or 'm4v'.`
+        );
+      }
+
+      // Validate preset
+      if (!handbrakeConfig.preset || handbrakeConfig.preset.trim() === '') {
+        throw new Error(
+          'HandBrake preset must be specified when HandBrake post-processing is enabled.'
+        );
+      }
+
+      // If cli_path is specified, make sure it exists
+      if (handbrakeConfig.cli_path) {
+        const cliPath = normalize(handbrakeConfig.cli_path);
+        try {
+          if (!fs.existsSync(cliPath)) {
+            throw new Error(
+              `Configured HandBrake CLI path does not exist: ${cliPath}`
+            );
+          }
+        } catch (error) {
+          throw new Error(
+            `Invalid HandBrake CLI path: ${error.message}`
+          );
+        }
+      }
     }
   }
 }

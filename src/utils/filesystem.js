@@ -2,7 +2,7 @@ import fs from "fs";
 import { join } from "path";
 import { Logger } from "./logger.js";
 import { PLATFORM_DEFAULTS } from "../constants/index.js";
-import { access } from "fs/promises";
+import { access, readdir } from "fs/promises";
 import os from "os";
 
 /**
@@ -46,6 +46,39 @@ export class FileSystemUtils {
 
     fs.mkdirSync(dir);
     return dir;
+  }
+
+  /**
+   * Read the contents of a directory
+   * @param {string} dirPath - The path to the directory to read
+   * @returns {Promise<string[]>} - Array of file/directory names in the directory
+   */
+  static async readdir(dirPath) {
+    try {
+      Logger.info(`Reading directory contents: ${dirPath}`);
+      const files = await readdir(dirPath);
+      Logger.info(`Found ${files.length} files/directories`);
+      return files;
+    } catch (error) {
+      Logger.error(`Error reading directory ${dirPath}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a file asynchronously
+   * @param {string} filePath - The path to the file to delete
+   * @returns {Promise<void>}
+   */
+  static async unlink(filePath) {
+    try {
+      Logger.info(`Deleting file: ${filePath}`);
+      await fs.promises.unlink(filePath);
+      Logger.info(`File deleted successfully: ${filePath}`);
+    } catch (error) {
+      Logger.error(`Error deleting file ${filePath}:`, error);
+      throw error;
+    }
   }
 
   /**

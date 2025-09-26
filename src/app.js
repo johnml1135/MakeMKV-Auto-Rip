@@ -7,6 +7,7 @@ import { CLIInterface } from "./cli/interface.js";
 import { AppConfig } from "./config/index.js";
 import { Logger } from "./utils/logger.js";
 import { safeExit, isProcessExitError } from "./utils/process.js";
+import { HandBrakeService } from "./services/handbrake.service.js";
 
 /**
  * Main application function
@@ -18,6 +19,21 @@ export async function main(flags = {}) {
   try {
     // Validate configuration before starting
     await AppConfig.validate();
+
+    // Validate HandBrake if enabled
+    try {
+      if (AppConfig.handbrake?.enabled) {
+        await HandBrakeService.validate();
+      }
+    } catch (error) {
+      Logger.error("HandBrake validation failed:", error.message);
+      if (error.details) {
+        Logger.error("Details:", error.details);
+      }
+      // We throw here because if HandBrake is enabled but not working,
+      // we want to fail early rather than process a disc only to fail at the conversion stage
+      throw error;
+    }
 
     // Start the CLI interface with flags
     const cli = new CLIInterface(flags);

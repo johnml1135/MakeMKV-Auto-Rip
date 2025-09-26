@@ -9,7 +9,7 @@ paths:
   # makemkv_dir: "C:/Program Files (x86)/MakeMKV" # For Advanced users only - overwrite the automatic detection
 
   # Directory where ripped movies/tv/media will be saved
-  movie_rips_dir: "./media"
+  movie_rips_dir: "G:/movies"
 
   # Logging configuration
   logging:
@@ -42,6 +42,22 @@ ripping:
   rip_all_titles: false
   # Ripping mode - async for parallel processing, sync for sequential (async/sync)
   mode: "async"
+
+# HandBrake post-processing settings
+handbrake:
+  # Enable HandBrake post-processing after ripping (true/false)
+  enabled: true
+  # Path to HandBrakeCLI executable
+  # Leave empty or comment out to use automatic detection based on your platform
+  # cli_path: "C:/Program Files/HandBrake/HandBrakeCLI.exe"
+  # Compression preset to use (see HandBrake documentation for available presets)
+  preset: "Fast 1080p30"
+  # Output format (mp4/m4v)
+  output_format: "mp4"
+  # Delete original MKV file after successful conversion (true/false)
+  delete_original: false
+  # Additional HandBrake CLI arguments (advanced users only)
+  additional_args: ""
 
 # Interface behavior settings
 interface:
