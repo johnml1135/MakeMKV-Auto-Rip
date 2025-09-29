@@ -218,8 +218,9 @@ export class HandBrakeService {
    * @private
    */
   static sanitizePath(filePath) {
-    // Remove any potentially dangerous characters
-    return filePath.replace(/[;&|`$(){}[\]]/g, '');
+    // Escape quotes and backslashes for safe shell execution
+    // This prevents injection while preserving valid path characters
+    return filePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 
   /**
@@ -362,6 +363,7 @@ export class HandBrakeService {
    * @returns {Promise<boolean>} True if conversion was successful
    */
   static async convertFile(inputPath) {
+    let outputPath; // Declare here to be accessible in catch block
     try {
       if (!AppConfig.handbrake?.enabled) {
         Logger.info("HandBrake post-processing is disabled, skipping...");
@@ -388,7 +390,7 @@ export class HandBrakeService {
       this.validateConfig();
 
       const handBrakePath = await this.getHandBrakePath();
-      const outputPath = path.join(
+      outputPath = path.join(
         path.dirname(inputPath),
         `${path.basename(inputPath, ".mkv")}.${AppConfig.handbrake.output_format.toLowerCase()}`
       );

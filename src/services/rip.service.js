@@ -1,5 +1,6 @@
 import { exec } from "child_process";
 import path from "path";
+import fs from "fs";
 import { AppConfig } from "../config/index.js";
 import { Logger } from "../utils/logger.js";
 import { FileSystemUtils } from "../utils/filesystem.js";
@@ -195,12 +196,12 @@ export class RipService {
     // Debug: Log MakeMKV output lines containing MSG: or completion-related terms
     Logger.info("Analyzing MakeMKV output for completion status...");
     const relevantLines = stdout.split('\n')
-      .filter(line => line.includes('MSG:') || 
-              line.toLowerCase().includes('copy') ||
-              line.toLowerCase().includes('complete') ||
-              line.toLowerCase().includes('progress'))
+      .filter(line => line.includes('MSG:') ||
+        line.toLowerCase().includes('copy') ||
+        line.toLowerCase().includes('complete') ||
+        line.toLowerCase().includes('progress'))
       .map(line => line.trim());
-    
+
     if (relevantLines.length > 0) {
       Logger.info("Found relevant MakeMKV output lines:");
       relevantLines.forEach(line => Logger.info(`- ${line}`));
@@ -216,22 +217,22 @@ export class RipService {
         Logger.info("Starting HandBrake post-processing workflow...");
         // Get the output path from MakeMKV output using MSG:5014
         // Pattern: MSG:5014,flags,"Saving N titles into directory file://path"
-        const outputMatch = stdout.match(/MSG:5014[^"]*"Saving \d+ titles into directory ([^"]*)"/) || 
-                           stdout.match(/MSG:5014[^"]*"[^"]*","[^"]*","[^"]*","([^"]*)"/) ||
-                           stdout.match(/Saving \d+ titles into directory ([^"\s]+)/);
-        
+        const outputMatch = stdout.match(/MSG:5014[^"]*"Saving \d+ titles into directory ([^"]*)"/) ||
+          stdout.match(/MSG:5014[^"]*"[^"]*","[^"]*","[^"]*","([^"]*)"/) ||
+          stdout.match(/Saving \d+ titles into directory ([^"\s]+)/);
+
         if (!outputMatch) {
           Logger.error("Failed to parse output directory from MakeMKV log");
-          Logger.error("Relevant log lines:", stdout.split('\n').filter(line => 
+          Logger.error("Relevant log lines:", stdout.split('\n').filter(line =>
             line.includes('MSG:5014') || line.includes('Saving') || line.includes('directory')));
           throw new Error("Could not find output folder in MakeMKV log");
         }
-        
+
         let outputFolder = outputMatch[1];
         // Handle file:// protocol prefix and normalize path separators
         outputFolder = outputFolder.replace(/^file:\/\//, '').replace(/\//g, path.sep);
         Logger.info(`Scanning for MKV files in: ${outputFolder}`);
-        
+
         // Verify the output folder exists
         if (!fs.existsSync(outputFolder)) {
           throw new Error(`Output folder does not exist: ${outputFolder}`);
@@ -239,20 +240,20 @@ export class RipService {
 
         const mkvFiles = await FileSystemUtils.readdir(outputFolder);
         Logger.info(`Found ${mkvFiles.length} files in output folder`);
-        
+
         // Process each MKV file from this rip
         for (const file of mkvFiles) {
           if (!file.endsWith(".mkv")) {
             Logger.info(`Skipping non-MKV file: ${file}`);
             continue;
           }
-          
+
           Logger.info(`Found MKV file: ${file}`);
-          
+
           const fullPath = path.join(outputFolder, file);
           Logger.info(`Found MKV file for processing: ${file}`);
           const success = await HandBrakeService.convertFile(fullPath);
-          
+
           if (!success) {
             Logger.error(`HandBrake processing failed for: ${file}`);
           }
