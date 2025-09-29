@@ -70,7 +70,7 @@ export class HandBrakeService {
       return true;
 
     } catch (error) {
-      Logger.warn(`Retry ${retryCount + 1} failed:`, error.message);
+      Logger.warning(`Retry ${retryCount + 1} failed: ${error.message}`);
 
       // Try again with next fallback preset
       return await this.retryConversion(inputPath, outputPath, handBrakePath, retryCount + 1);
@@ -310,7 +310,7 @@ export class HandBrakeService {
 
     // Check if file is suspiciously small (likely corruption)
     if (fileSizeMB < HANDBRAKE_CONSTANTS.MIN_FILE_SIZE_MB) {
-      Logger.warn(`Output file is very small (${fileSizeMB.toFixed(2)} MB) - possible conversion issue`);
+      Logger.warning(`Output file is very small (${fileSizeMB.toFixed(2)} MB) - possible conversion issue`);
     }
 
     // Verify file can be opened (basic corruption check)
@@ -324,7 +324,7 @@ export class HandBrakeService {
       const header = buffer.toString('hex', 0, 8);
       const expectedHeader = HANDBRAKE_CONSTANTS.FILE_HEADERS[AppConfig.handbrake.output_format.toUpperCase()];
       if (!header.includes(expectedHeader)) {
-        Logger.warn('Output file may not be a valid video file - header mismatch');
+        Logger.warning('Output file may not be a valid video file - header mismatch');
       }
     } catch (error) {
       throw new HandBrakeError(`Output file appears to be corrupted: ${error.message}`);
@@ -362,8 +362,8 @@ export class HandBrakeService {
     );
 
     if (warningLines.length > 0) {
-      Logger.warn(`HandBrake warnings detected:`);
-      warningLines.forEach(warning => Logger.warn(`  ${warning.trim()}`));
+      Logger.warning(`HandBrake warnings detected:`);
+      warningLines.forEach(warning => Logger.warning(`  ${warning.trim()}`));
     }
   }
 
@@ -479,7 +479,7 @@ export class HandBrakeService {
           }
         }
       } catch (cleanupError) {
-        Logger.warn("Failed to cleanup incomplete output file:", cleanupError.message);
+        Logger.warning(`Failed to cleanup incomplete output file: ${cleanupError.message}`);
       }
 
       if (error instanceof HandBrakeError) {
