@@ -271,7 +271,7 @@ handbrake:
   output_format: "mp4"
 
   # Delete original MKV file after successful conversion (true/false)
-  delete_original: false
+  delete_original: true
 
   # Additional HandBrake CLI arguments (advanced users only)
   additional_args: ""
