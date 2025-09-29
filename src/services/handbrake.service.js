@@ -7,6 +7,7 @@ import { Logger } from "../utils/logger.js";
 import { FileSystemUtils } from "../utils/filesystem.js";
 import { ValidationUtils } from "../utils/validation.js";
 import { HANDBRAKE_CONSTANTS } from "../constants/index.js";
+import { validateHandBrakeConfig } from "../utils/handbrake-config.js";
 
 const execAsync = promisify(exec);
 
@@ -14,7 +15,7 @@ const execAsync = promisify(exec);
  * Error class for HandBrake-specific errors
  * @extends Error
  */
-class HandBrakeError extends Error {
+export class HandBrakeError extends Error {
   /**
    * Create a HandBrake error
    * @param {string} message - The error message
@@ -41,36 +42,26 @@ export class HandBrakeService {
    * @private
    */
   static async retryConversion(inputPath, outputPath, handBrakePath, retryCount = 0) {
-    const maxRetries = 2;
-    const fallbackPresets = ["Fast 1080p30", "Fast 720p30", "Fast 480p30"];
+    const { MAX_ATTEMPTS, FALLBACK_PRESETS } = HANDBRAKE_CONSTANTS.RETRY;
 
-    if (retryCount >= maxRetries) {
+    if (retryCount >= MAX_ATTEMPTS) {
       Logger.error("Maximum retry attempts reached for HandBrake conversion");
       return false;
     }
 
     try {
-      // Use fallback preset for retries
-      const originalPreset = AppConfig.handbrake.preset;
-      const fallbackPreset = fallbackPresets[retryCount] || fallbackPresets[0];
+      // Use fallback preset for retries (pass as parameter instead of mutating config)
+      const fallbackPreset = FALLBACK_PRESETS[retryCount] || FALLBACK_PRESETS[0];
 
       Logger.info(`Retry attempt ${retryCount + 1} with preset: ${fallbackPreset}`);
 
-      // Temporarily override preset
-      const tempConfig = { ...AppConfig.handbrake };
-      tempConfig.preset = fallbackPreset;
-      const tempOriginal = AppConfig.handbrake;
-      AppConfig.handbrake = tempConfig;
-
-      const command = this.buildCommand(handBrakePath, inputPath, outputPath);
+      // Build command with override preset - no config mutation
+      const command = this.buildCommand(handBrakePath, inputPath, outputPath, fallbackPreset);
 
       const { stdout, stderr } = await execAsync(command, {
-        timeout: HANDBRAKE_CONSTANTS.MIN_TIMEOUT_HOURS * 60 * 60 * 1000, // Shorter timeout for retries
+        timeout: HANDBRAKE_CONSTANTS.MIN_TIMEOUT_HOURS * HANDBRAKE_CONSTANTS.TIMEOUT.MS_PER_HOUR,
         maxBuffer: 1024 * 1024 * 10
       });
-
-      // Restore original config
-      AppConfig.handbrake = tempOriginal;
 
       this.parseHandBrakeOutput(stdout, stderr);
       await this.validateOutput(outputPath);
@@ -91,8 +82,8 @@ export class HandBrakeService {
    * @returns {Promise<void>}
    * @throws {HandBrakeError} If HandBrake is not properly configured or installed
    */
-  static async validate(configOverride = null) {
-    const config = configOverride || AppConfig.handbrake;
+  static async validate(configOverride) {
+    const config = arguments.length > 0 ? configOverride : AppConfig.handbrake;
 
     if (!config?.enabled) {
       Logger.info("HandBrake post-processing is disabled");
@@ -102,7 +93,11 @@ export class HandBrakeService {
     Logger.info("Validating HandBrake setup...");
 
     // Validate configuration first
-    this.validateConfig(configOverride);
+    if (arguments.length > 0) {
+      this.validateConfig(configOverride);
+    } else {
+      this.validateConfig();
+    }
 
     // Then validate HandBrake installation
     try {
@@ -122,24 +117,26 @@ export class HandBrakeService {
    * @throws {HandBrakeError} If configuration is invalid
    * @private
    */
-  static validateConfig(configOverride = null) {
-    const config = configOverride || AppConfig.handbrake;
+  static validateConfig(configOverride) {
+    // If called with an explicit argument (even if null/undefined), use it
+    // Otherwise use AppConfig.handbrake
+    const config = arguments.length > 0 ? configOverride : AppConfig.handbrake;
 
-    if (!config) {
-      throw new HandBrakeError("HandBrake configuration is missing");
+    // Use utility function for schema validation
+    const validation = validateHandBrakeConfig(config);
+    if (!validation.isValid) {
+      // Include specific errors in the main message for better debugging
+      const errorMessage = validation.errors.length === 1 && validation.errors[0] === 'HandBrake configuration is missing or invalid'
+        ? validation.errors[0]
+        : `HandBrake configuration is invalid: ${validation.errors.join("; ")}`;
+
+      throw new HandBrakeError(
+        errorMessage,
+        validation.errors.join("; ")
+      );
     }
 
-    // Validate output format
-    if (!HANDBRAKE_CONSTANTS.SUPPORTED_FORMATS.includes(config.output_format?.toLowerCase())) {
-      throw new HandBrakeError(`Invalid output format '${config.output_format}'. Must be one of: ${HANDBRAKE_CONSTANTS.SUPPORTED_FORMATS.join(', ')}`);
-    }
-
-    // Validate preset
-    if (!config.preset || config.preset.trim() === '') {
-      throw new HandBrakeError("HandBrake preset must be specified");
-    }
-
-    // Validate additional args don't conflict with core settings
+    // Additional validation for conflicting arguments
     if (config.additional_args) {
       const conflictingArgs = ['-i', '--input', '-o', '--output', '--preset'];
       const hasConflict = conflictingArgs.some(arg => config.additional_args.includes(arg));
@@ -215,12 +212,23 @@ export class HandBrakeService {
    * Sanitize file path to prevent injection attacks
    * @param {string} filePath - The file path to sanitize
    * @returns {string} Sanitized path
+   * @throws {HandBrakeError} If path contains dangerous patterns
    * @private
    */
   static sanitizePath(filePath) {
-    // Escape quotes and backslashes for safe shell execution
-    // This prevents injection while preserving valid path characters
-    return filePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    // Remove null bytes and control characters
+    let sanitized = filePath.replace(/[\x00-\x1F\x7F]/g, '');
+
+    // Detect path traversal attempts BEFORE normalizing
+    if (sanitized.includes('..')) {
+      throw new HandBrakeError("Path traversal detected in path", filePath);
+    }
+
+    // Don't normalize path separators - HandBrake accepts forward slashes on all platforms
+    // This keeps tests consistent and avoids platform-specific issues
+
+    // Escape shell-sensitive characters for safe shell execution
+    return sanitized.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 
   /**
@@ -228,12 +236,14 @@ export class HandBrakeService {
    * @param {string} handBrakePath - Path to HandBrakeCLI executable
    * @param {string} inputPath - Path to input MKV file
    * @param {string} outputPath - Path to output file
+   * @param {string|null} presetOverride - Optional preset override (for retries)
    * @returns {string} Constructed command
    * @throws {HandBrakeError} If paths contain invalid characters
    * @private
    */
-  static buildCommand(handBrakePath, inputPath, outputPath) {
+  static buildCommand(handBrakePath, inputPath, outputPath, presetOverride = null) {
     const config = AppConfig.handbrake;
+    const preset = presetOverride || config.preset;
 
     // Validate and sanitize paths
     if (!handBrakePath || !inputPath || !outputPath) {
@@ -250,7 +260,7 @@ export class HandBrakeService {
       `"${sanitizedHandBrakePath}"`,
       `--input "${sanitizedInputPath}"`,
       `--output "${sanitizedOutputPath}"`,
-      `--preset "${config.preset}"`,
+      `--preset "${preset}"`,
       '--verbose=1', // Enable progress output
       '--no-dvdnav'  // Disable DVD navigation for better compatibility
     ];
@@ -364,6 +374,7 @@ export class HandBrakeService {
    */
   static async convertFile(inputPath) {
     let outputPath; // Declare here to be accessible in catch block
+    let command; // Declare here to be accessible in catch block
     try {
       if (!AppConfig.handbrake?.enabled) {
         Logger.info("HandBrake post-processing is disabled, skipping...");
@@ -406,7 +417,7 @@ export class HandBrakeService {
       Logger.info(`Output will be saved as: ${path.basename(outputPath)}`);
       Logger.info("This may take a while depending on the file size and preset used.");
 
-      const command = this.buildCommand(handBrakePath, inputPath, outputPath);
+      command = this.buildCommand(handBrakePath, inputPath, outputPath);
       Logger.info(`Executing command: ${command}`);
 
       // Set timeout based on file size (rough estimate: 2 hours + 1 minute per GB)
@@ -462,7 +473,7 @@ export class HandBrakeService {
       try {
         if (outputPath && fs.existsSync(outputPath)) {
           const stats = fs.statSync(outputPath);
-          if (stats.size === 0 || stats.size < 1024 * 1024) { // Less than 1MB
+          if (stats.size === 0 || stats.size < HANDBRAKE_CONSTANTS.VALIDATION.MIN_OUTPUT_SIZE_BYTES) {
             Logger.info("Removing incomplete output file...");
             fs.unlinkSync(outputPath);
           }
@@ -481,12 +492,12 @@ export class HandBrakeService {
         Logger.error("Consider increasing timeout or using a faster preset");
       } else {
         Logger.error("HandBrake conversion failed with unexpected error:");
-        Logger.error("Error Details:", {
-          name: error.name,
-          code: error.code,
-          message: error.message,
-          command: typeof command !== 'undefined' ? command : 'Command not available'
-        });
+        Logger.error(`Error Details: ${error.message || 'Unknown error'}`);
+        Logger.error(`Error Name: ${error.name || 'Unknown'}`);
+        Logger.error(`Error Code: ${error.code || 'Unknown'}`);
+        if (command) {
+          Logger.error(`Command: ${command}`);
+        }
       }
       return false;
     }

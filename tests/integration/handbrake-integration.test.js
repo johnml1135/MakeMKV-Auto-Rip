@@ -106,7 +106,7 @@ describe("HandBrake Integration Tests", () => {
       preset: "Fast 1080p30",
       output_format: "mp4",
       delete_original: false,
-      additional_args: "--quality 22; echo test" // Potentially dangerous command injection
+      additional_args: "--quality 22 && rm -rf /" // Test actual dangerous pattern detection
     };
 
     const command = HandBrakeService.buildCommand(
@@ -115,7 +115,8 @@ describe("HandBrake Integration Tests", () => {
       path.join(testDir, "output.mp4")
     );
 
-    // Should not contain the dangerous part
-    expect(command).not.toContain("echo test");
+    // Should not contain the dangerous part due to dangerous character validation
+    expect(command).not.toContain("rm -rf");
+    expect(command).not.toContain("&&");
   });
 });

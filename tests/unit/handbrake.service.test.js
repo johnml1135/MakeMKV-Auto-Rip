@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
-import { HandBrakeService } from "../../src/services/handbrake.service.js";
+import { HandBrakeService, HandBrakeError } from "../../src/services/handbrake.service.js";
 import { AppConfig } from "../../src/config/index.js";
 import { Logger } from "../../src/utils/logger.js";
 import { exec } from "child_process";
@@ -58,12 +58,12 @@ describe("HandBrakeService", () => {
 
     it("should throw error for invalid output format", () => {
       const invalidConfig = { ...mockAppConfig.handbrake, output_format: "avi" };
-      expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/Invalid output format/);
+      expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/output_format must be one of/);
     });
 
     it("should throw error for empty preset", () => {
       const invalidConfig = { ...mockAppConfig.handbrake, preset: "" };
-      expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/preset must be specified/);
+      expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/preset is required/);
     });
 
     it("should throw error for conflicting additional args", () => {

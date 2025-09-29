@@ -45,6 +45,20 @@ export const HANDBRAKE_CONSTANTS = {
   FILE_HEADERS: {
     MP4: "66747970", // 'ftyp' in hex
     M4V: "66747970"  // Same as MP4
+  },
+  VALIDATION: {
+    HEADER_BYTES: 8,
+    MIN_OUTPUT_SIZE_MB: 1,
+    MIN_OUTPUT_SIZE_BYTES: 1024 * 1024,
+    BUFFER_SIZE: 1024
+  },
+  TIMEOUT: {
+    MS_PER_HOUR: 60 * 60 * 1000,
+    MS_PER_MINUTE: 60 * 1000
+  },
+  RETRY: {
+    MAX_ATTEMPTS: 2,
+    FALLBACK_PRESETS: ["Fast 1080p30", "Fast 720p30", "Fast 480p30"]
   }
 };
 

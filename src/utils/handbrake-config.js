@@ -10,8 +10,17 @@
 export function validateHandBrakeConfig(config) {
   const errors = [];
 
+  // Check if config exists and is a plain object
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    errors.push('HandBrake configuration is missing or invalid');
+    return {
+      isValid: false,
+      errors
+    };
+  }
+
   // Check required fields when enabled
-  if (config?.enabled === true) {
+  if (config.enabled === true) {
     // Validate preset
     if (!config.preset || typeof config.preset !== 'string' || config.preset.trim() === '') {
       errors.push('preset is required when HandBrake is enabled');

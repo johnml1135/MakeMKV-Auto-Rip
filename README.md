@@ -337,6 +337,34 @@ makemkv:
   - **`handbrake.additional_args`** - Additional HandBrakeCLI arguments for advanced users
     - Example: `"--audio-lang-list eng --all-audio"`
 
+### HandBrake Error Handling & Retry Logic
+
+When HandBrake conversion fails, the system automatically implements an intelligent retry strategy:
+
+1. **First attempt**: Uses your configured preset (e.g., "Fast 1080p30")
+2. **Retry 1**: Falls back to "Fast 1080p30" preset (faster encoding, good quality)
+3. **Retry 2**: Falls back to "Fast 720p30" preset (lower resolution, faster)
+4. **Final retry**: Falls back to "Fast 480p30" preset (lowest quality, fastest)
+
+**Failure Behavior:**
+- Original MKV file is **always preserved** (even if `delete_original: true`)
+- Errors are logged with detailed information for troubleshooting
+- Ripping workflow continues normally (conversion failure doesn't stop disc ejection)
+- Partial/incomplete output files are automatically cleaned up
+
+**Common Issues & Solutions:**
+
+| Issue                         | Solution                                                           |
+| ----------------------------- | ------------------------------------------------------------------ |
+| **Timeout errors**            | Increase timeout by using a faster preset or wait for larger files |
+| **Invalid output**            | Check HandBrake installation and permissions                       |
+| **Permission denied**         | Verify output folder permissions and disk space                    |
+| **Header validation warning** | Usually safe to ignore unless file won't play                      |
+| **Process killed**            | System may be low on memory; try faster preset                     |
+
+**Environment Variables:**
+- `HANDBRAKE_STRICT_VALIDATION=true` - Enable strict file header validation (optional)
+
 **Important Notes:**
 
 - Recommended: Create dedicated folders for movie rips and logs
