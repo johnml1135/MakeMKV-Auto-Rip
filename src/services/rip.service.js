@@ -18,6 +18,8 @@ export class RipService {
   constructor() {
     this.goodVideoArray = [];
     this.badVideoArray = [];
+    this.goodHandBrakeArray = [];
+    this.badHandBrakeArray = [];
   }
 
   /**
@@ -254,7 +256,11 @@ export class RipService {
           Logger.info(`Found MKV file for processing: ${file}`);
           const success = await HandBrakeService.convertFile(fullPath);
 
-          if (!success) {
+          if (success) {
+            this.goodHandBrakeArray.push(file);
+            Logger.info(`HandBrake processing succeeded for: ${file}`);
+          } else {
+            this.badHandBrakeArray.push(file);
             Logger.error(`HandBrake processing failed for: ${file}`);
           }
         }
@@ -309,9 +315,28 @@ export class RipService {
       );
     }
 
+    // Display HandBrake results if HandBrake was enabled
+    if (AppConfig.isHandBrakeEnabled) {
+      if (this.goodHandBrakeArray.length > 0) {
+        Logger.info(
+          "The following files were successfully converted with HandBrake: ",
+          this.goodHandBrakeArray.join(", ")
+        );
+      }
+
+      if (this.badHandBrakeArray.length > 0) {
+        Logger.info(
+          "The following files failed HandBrake conversion: ",
+          this.badHandBrakeArray.join(", ")
+        );
+      }
+    }
+
     // Reset arrays for next run
     this.goodVideoArray = [];
     this.badVideoArray = [];
+    this.goodHandBrakeArray = [];
+    this.badHandBrakeArray = [];
   }
 
   /**

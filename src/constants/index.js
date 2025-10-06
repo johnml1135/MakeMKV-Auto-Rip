@@ -20,15 +20,15 @@ export const LOG_LEVELS = Object.freeze({
   WARNING: "warning",
 });
 
-export const VALIDATION_CONSTANTS = {
+export const VALIDATION_CONSTANTS = Object.freeze({
   DRIVE_FILTER: "DRV:",
   MEDIA_PRESENT: 2,
   TITLE_LENGTH_CODE: 9,
   COPY_COMPLETE_MSG: "MSG:5036",
   MINIMUM_TITLE_LENGTH: 120, // seconds
-};
+});
 
-export const HANDBRAKE_CONSTANTS = {
+export const HANDBRAKE_CONSTANTS = Object.freeze({
   SUPPORTED_FORMATS: ["mp4", "m4v"],
   DEFAULT_PRESET: "Fast 1080p30",
   MIN_FILE_SIZE_MB: 10, // Minimum reasonable output size
@@ -42,25 +42,25 @@ export const HANDBRAKE_CONSTANTS = {
     "Fast 720p30",
     "Fast 480p30"
   ],
-  FILE_HEADERS: {
+  FILE_HEADERS: Object.freeze({
     MP4: "66747970", // 'ftyp' in hex
     M4V: "66747970"  // Same as MP4
-  },
-  VALIDATION: {
+  }),
+  VALIDATION: Object.freeze({
     HEADER_BYTES: 8,
     MIN_OUTPUT_SIZE_MB: 1,
     MIN_OUTPUT_SIZE_BYTES: 1024 * 1024,
     BUFFER_SIZE: 1024
-  },
-  TIMEOUT: {
+  }),
+  TIMEOUT: Object.freeze({
     MS_PER_HOUR: 60 * 60 * 1000,
     MS_PER_MINUTE: 60 * 1000
-  },
-  RETRY: {
+  }),
+  RETRY: Object.freeze({
     MAX_ATTEMPTS: 2,
-    FALLBACK_PRESETS: ["Fast 1080p30", "Fast 720p30", "Fast 480p30"]
-  }
-};
+    FALLBACK_PRESETS: Object.freeze(["Fast 1080p30", "Fast 720p30", "Fast 480p30"])
+  })
+});
 
 export const MENU_OPTIONS = Object.freeze({
   RIP: "1",

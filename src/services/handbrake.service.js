@@ -273,13 +273,15 @@ export class HandBrakeService {
     // Add custom arguments if specified (with validation)
     if (config.additional_args && config.additional_args.trim()) {
       // Validate additional args don't contain dangerous characters
-      if (/[;&|`$()]/.test(config.additional_args)) {
-        Logger.warning('Additional arguments contain potentially unsafe characters, skipping');
-      } else {
-        // Split by space but respect quoted arguments
-        const customArgs = config.additional_args.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-        args.push(...customArgs);
+      if (/[;&|`$()<>\n\r]/.test(config.additional_args)) {
+        throw new HandBrakeError(
+          'Additional arguments contain unsafe shell characters',
+          `Invalid characters detected in: ${config.additional_args}`
+        );
       }
+      // Split by space but respect quoted arguments
+      const customArgs = config.additional_args.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+      args.push(...customArgs);
     }
 
     return args.join(' ');
@@ -469,6 +471,27 @@ export class HandBrakeService {
 
       return true;
     } catch (error) {
+      // Attempt retry with fallback presets
+      Logger.warning(`Initial conversion failed: ${error.message}`);
+      Logger.info("Attempting retry with fallback preset...");
+
+      try {
+        const handBrakePath = await this.getHandBrakePath();
+        const retrySuccess = await this.retryConversion(inputPath, outputPath, handBrakePath, 0);
+
+        if (retrySuccess) {
+          // Successful retry - check if we should delete original
+          if (AppConfig.handbrake.delete_original) {
+            Logger.info(`Deleting original MKV file: ${path.basename(inputPath)}`);
+            await FileSystemUtils.unlink(inputPath);
+            Logger.info("Original MKV file deleted successfully");
+          }
+          return true;
+        }
+      } catch (retryError) {
+        Logger.error(`Retry also failed: ${retryError.message}`);
+      }
+
       // Cleanup partial output file on failure
       try {
         if (outputPath && fs.existsSync(outputPath)) {

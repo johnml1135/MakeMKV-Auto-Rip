@@ -109,14 +109,13 @@ describe("HandBrake Integration Tests", () => {
       additional_args: "--quality 22 && rm -rf /" // Test actual dangerous pattern detection
     };
 
-    const command = HandBrakeService.buildCommand(
-      "/usr/bin/HandBrakeCLI",
-      mockMkvFile,
-      path.join(testDir, "output.mp4")
-    );
-
-    // Should not contain the dangerous part due to dangerous character validation
-    expect(command).not.toContain("rm -rf");
-    expect(command).not.toContain("&&");
+    // Should throw an error due to dangerous character validation
+    expect(() => {
+      HandBrakeService.buildCommand(
+        "/usr/bin/HandBrakeCLI",
+        mockMkvFile,
+        path.join(testDir, "output.mp4")
+      );
+    }).toThrow(/unsafe shell characters/);
   });
 });

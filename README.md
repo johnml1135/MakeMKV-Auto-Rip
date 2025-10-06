@@ -321,9 +321,13 @@ makemkv:
 - **HandBrake Configuration**:
   - **`handbrake.enabled`** - Enable/disable HandBrake post-processing (`true` or `false`)
   - **`handbrake.cli_path`** - Path to HandBrakeCLI executable (auto-detected if not specified)
+    - **IMPORTANT:** HandBrakeCLI is a **separate download** from the GUI (different installer/package)
+      - GUI version: [https://handbrake.fr/downloads.php](https://handbrake.fr/downloads.php)
+      - **CLI version: [https://handbrake.fr/downloads2.php](https://handbrake.fr/downloads2.php)** ← Download this one!
+    - Windows: Comes as a ZIP file - extract `HandBrakeCLI.exe` to a folder (e.g., `C:/HandBrakeCLI/`)
     - Supports forward slashes on all platforms
-    - Common locations:
-      - Windows: `"C:/Program Files/HandBrake/HandBrakeCLI.exe"`
+    - Common locations after installation:
+      - Windows: `"C:/HandBrakeCLI/HandBrakeCLI.exe"` (wherever you extracted it)
       - Linux: `"/usr/bin/HandBrakeCLI"`
       - macOS: `"/usr/local/bin/HandBrakeCLI"` or `"/opt/homebrew/bin/HandBrakeCLI"`
   - **`handbrake.preset`** - HandBrake encoding preset
@@ -361,9 +365,6 @@ When HandBrake conversion fails, the system automatically implements an intellig
 | **Permission denied**         | Verify output folder permissions and disk space                    |
 | **Header validation warning** | Usually safe to ignore unless file won't play                      |
 | **Process killed**            | System may be low on memory; try faster preset                     |
-
-**Environment Variables:**
-- `HANDBRAKE_STRICT_VALIDATION=true` - Enable strict file header validation (optional)
 
 **Important Notes:**
 

@@ -49,7 +49,11 @@ handbrake:
   enabled: false
   # Path to HandBrakeCLI executable
   # Leave empty or comment out to use automatic detection based on your platform
-  # cli_path: "C:/Program Files/HandBrake/HandBrakeCLI.exe"
+  # IMPORTANT: HandBrakeCLI is a SEPARATE download from the GUI (different installer/package)
+  #   - GUI: https://handbrake.fr/downloads.php
+  #   - CLI: https://handbrake.fr/downloads2.php (Download the CLI version!)
+  # Windows: Comes as a ZIP file, extract HandBrakeCLI.exe to a folder of your choice
+  # cli_path: "C:/HandBrakeCLI/HandBrakeCLI.exe"
   # Compression preset to use (see HandBrake documentation for available presets)
   preset: "Fast 1080p30"
   # Output format (mp4/m4v)
