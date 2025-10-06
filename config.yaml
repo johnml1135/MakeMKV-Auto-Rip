@@ -9,7 +9,7 @@ paths:
   # makemkv_dir: "C:/Program Files (x86)/MakeMKV" # For Advanced users only - overwrite the automatic detection
 
   # Directory where ripped movies/tv/media will be saved
-  movie_rips_dir: "G:/movies"
+  movie_rips_dir: "./media"
 
   # Logging configuration
   logging:
