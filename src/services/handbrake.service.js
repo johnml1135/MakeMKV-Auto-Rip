@@ -2,6 +2,7 @@ import { exec } from "child_process";
 import path from "path";
 import { promisify } from "util";
 import fs from "fs";
+import { open, stat } from "fs/promises";
 import { AppConfig } from "../config/index.js";
 import { Logger } from "../utils/logger.js";
 import { FileSystemUtils } from "../utils/filesystem.js";
@@ -161,19 +162,19 @@ export class HandBrakeService {
     const config = configOverride || AppConfig.handbrake;
 
     if (config?.cli_path) {
-      Logger.info("Using configured HandBrakeCLI path...");
+      Logger.debug("Using configured HandBrakeCLI path...");
       if (!fs.existsSync(config.cli_path)) {
         throw new HandBrakeError(
           "Configured HandBrakeCLI path does not exist",
           `Path: ${config.cli_path}`
         );
       }
-      Logger.info(`Found HandBrakeCLI at: ${config.cli_path}`);
+      Logger.debug(`Found HandBrakeCLI at: ${config.cli_path}`);
       return config.cli_path;
     }
 
     // Auto-detect based on platform
-    Logger.info("Auto-detecting HandBrakeCLI installation...");
+    Logger.debug("Auto-detecting HandBrakeCLI installation...");
     const isWindows = process.platform === "win32";
     const defaultPaths = isWindows
       ? [
@@ -187,9 +188,9 @@ export class HandBrakeService {
       ];
 
     for (const path of defaultPaths) {
-      Logger.info(`Checking path: ${path}`);
+      Logger.debug(`Checking path: ${path}`);
       if (fs.existsSync(path)) {
-        Logger.info(`Found HandBrakeCLI at: ${path}`);
+        Logger.debug(`Found HandBrakeCLI at: ${path}`);
         return path;
       }
     }
@@ -294,16 +295,22 @@ export class HandBrakeService {
    * @private
    */
   static async validateOutput(outputPath) {
-    Logger.info("Validating HandBrake output...");
+    Logger.debug("Validating HandBrake output...");
 
-    if (!fs.existsSync(outputPath)) {
-      throw new HandBrakeError("HandBrake conversion failed - output file not created");
+    // Check if file exists using async stat
+    let stats;
+    try {
+      stats = await stat(outputPath);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new HandBrakeError("HandBrake conversion failed - output file not created");
+      }
+      throw new HandBrakeError(`Failed to access output file: ${error.message}`);
     }
 
-    const stats = fs.statSync(outputPath);
     const fileSizeMB = (stats.size / 1024 / 1024);
 
-    Logger.info(`Output file exists, size: ${fileSizeMB.toFixed(2)} MB`);
+    Logger.debug(`Output file exists, size: ${fileSizeMB.toFixed(2)} MB`);
 
     // Check if file is empty
     if (!stats || stats.size === 0) {
@@ -316,11 +323,11 @@ export class HandBrakeService {
     }
 
     // Verify file can be opened (basic corruption check)
+    let fileHandle;
     try {
-      const fd = fs.openSync(outputPath, 'r');
+      fileHandle = await open(outputPath, 'r');
       const buffer = Buffer.alloc(1024);
-      fs.readSync(fd, buffer, 0, 1024, 0);
-      fs.closeSync(fd);
+      await fileHandle.read(buffer, 0, 1024, 0);
 
       // Check for common video file headers
       const header = buffer.toString('hex', 0, 8);
@@ -330,9 +337,13 @@ export class HandBrakeService {
       }
     } catch (error) {
       throw new HandBrakeError(`Output file appears to be corrupted: ${error.message}`);
+    } finally {
+      if (fileHandle) {
+        await fileHandle.close();
+      }
     }
 
-    Logger.info(`Output file validated successfully (${fileSizeMB.toFixed(2)} MB)`);
+    Logger.debug(`Output file validated successfully (${fileSizeMB.toFixed(2)} MB)`);
   }
 
   /**
@@ -354,7 +365,7 @@ export class HandBrakeService {
 
     if (progressLines.length > 0) {
       const lastProgress = progressLines[progressLines.length - 1];
-      Logger.info(`HandBrake progress: ${lastProgress.trim()}`);
+      Logger.debug(`HandBrake progress: ${lastProgress.trim()}`);
     }
 
     // Check for warnings (but not errors)
@@ -384,7 +395,7 @@ export class HandBrakeService {
       }
 
       Logger.info("Beginning HandBrake post-processing...");
-      Logger.info(`Input file path: ${inputPath}`);
+      Logger.debug(`Input file path: ${inputPath}`);
 
       // Validate input file
       if (!fs.existsSync(inputPath)) {
@@ -393,13 +404,13 @@ export class HandBrakeService {
 
       const inputStats = fs.statSync(inputPath);
       const inputSizeMB = (inputStats.size / 1024 / 1024);
-      Logger.info(`Input file size: ${inputSizeMB.toFixed(2)} MB`);
+      Logger.debug(`Input file size: ${inputSizeMB.toFixed(2)} MB`);
 
       if (inputStats.size === 0) {
         throw new HandBrakeError(`Input file is empty: ${inputPath}`);
       }
 
-      Logger.info("Validating HandBrake configuration...");
+      Logger.debug("Validating HandBrake configuration...");
       this.validateConfig();
 
       const handBrakePath = await this.getHandBrakePath();
@@ -408,19 +419,19 @@ export class HandBrakeService {
         `${path.basename(inputPath, ".mkv")}.${AppConfig.handbrake.output_format.toLowerCase()}`
       );
 
-      Logger.info(`HandBrake configuration:`);
-      Logger.info(`- CLI Path: ${handBrakePath}`);
-      Logger.info(`- Preset: ${AppConfig.handbrake.preset}`);
-      Logger.info(`- Output Format: ${AppConfig.handbrake.output_format}`);
-      Logger.info(`- Delete Original: ${AppConfig.handbrake.delete_original}`);
+      Logger.debug(`HandBrake configuration:`);
+      Logger.debug(`- CLI Path: ${handBrakePath}`);
+      Logger.debug(`- Preset: ${AppConfig.handbrake.preset}`);
+      Logger.debug(`- Output Format: ${AppConfig.handbrake.output_format}`);
+      Logger.debug(`- Delete Original: ${AppConfig.handbrake.delete_original}`);
       Logger.info(`Starting HandBrake conversion for: ${path.basename(inputPath)}`);
-      Logger.info(`Output format: ${AppConfig.handbrake.output_format}`);
-      Logger.info(`Using preset: ${AppConfig.handbrake.preset}`);
-      Logger.info(`Output will be saved as: ${path.basename(outputPath)}`);
-      Logger.info("This may take a while depending on the file size and preset used.");
+      Logger.debug(`Output format: ${AppConfig.handbrake.output_format}`);
+      Logger.debug(`Using preset: ${AppConfig.handbrake.preset}`);
+      Logger.debug(`Output will be saved as: ${path.basename(outputPath)}`);
+      Logger.debug("This may take a while depending on the file size and preset used.");
 
       command = this.buildCommand(handBrakePath, inputPath, outputPath);
-      Logger.info(`Executing command: ${command}`);
+      Logger.debug(`Executing command: ${command}`);
 
       // Set timeout based on file size (rough estimate: 2 hours + 1 minute per GB)
       const fileSizeGB = inputStats.size / (1024 * 1024 * 1024);
@@ -429,11 +440,11 @@ export class HandBrakeService {
         Math.min(fileSizeGB * 60 * 1000, HANDBRAKE_CONSTANTS.MAX_TIMEOUT_HOURS * 60 * 60 * 1000)
       );
 
-      Logger.info(`File size: ${fileSizeGB.toFixed(2)} GB, timeout: ${(timeoutMs / 1000 / 60).toFixed(0)} minutes`);
+      Logger.debug(`File size: ${fileSizeGB.toFixed(2)} GB, timeout: ${(timeoutMs / 1000 / 60).toFixed(0)} minutes`);
 
       // Start timing the conversion
       const conversionStart = Date.now();
-      Logger.info("Starting HandBrake encoding process...");
+      Logger.debug("Starting HandBrake encoding process...");
 
       const { stdout, stderr } = await execAsync(command, {
         timeout: timeoutMs,
@@ -455,25 +466,24 @@ export class HandBrakeService {
       const compressionRatio = ((1 - outputStats.size / inputStats.size) * 100).toFixed(1);
       const processingSpeed = (fileSizeGB / (conversionTimeMs / 1000 / 60 / 60)).toFixed(2); // GB/hour
 
-      Logger.info(`HandBrake conversion completed successfully: ${path.basename(outputPath)}`);
-      Logger.info(`Conversion metrics:`);
-      Logger.info(`  - Duration: ${conversionTimeMin} minutes`);
-      Logger.info(`  - Original size: ${inputSizeMB.toFixed(2)} MB`);
-      Logger.info(`  - Compressed size: ${outputSizeMB} MB`);
-      Logger.info(`  - Compression: ${compressionRatio}% reduction`);
-      Logger.info(`  - Processing speed: ${processingSpeed} GB/hour`);
+      Logger.info(`HandBrake conversion completed successfully: ${path.basename(outputPath)}`);      Logger.debug(`Conversion metrics:`);
+      Logger.debug(`  - Duration: ${conversionTimeMin} minutes`);
+      Logger.debug(`  - Original size: ${inputSizeMB.toFixed(2)} MB`);
+      Logger.debug(`  - Compressed size: ${outputSizeMB} MB`);
+      Logger.debug(`  - Compression: ${compressionRatio}% reduction`);
+      Logger.debug(`  - Processing speed: ${processingSpeed} GB/hour`);
 
       if (AppConfig.handbrake.delete_original) {
-        Logger.info(`Deleting original MKV file: ${path.basename(inputPath)}`);
+        Logger.debug(`Deleting original MKV file: ${path.basename(inputPath)}`);
         await FileSystemUtils.unlink(inputPath);
-        Logger.info("Original MKV file deleted successfully");
+        Logger.debug("Original MKV file deleted successfully");
       }
 
       return true;
     } catch (error) {
       // Attempt retry with fallback presets
       Logger.warning(`Initial conversion failed: ${error.message}`);
-      Logger.info("Attempting retry with fallback preset...");
+      Logger.debug("Attempting retry with fallback preset...");
 
       try {
         const handBrakePath = await this.getHandBrakePath();
@@ -482,9 +492,9 @@ export class HandBrakeService {
         if (retrySuccess) {
           // Successful retry - check if we should delete original
           if (AppConfig.handbrake.delete_original) {
-            Logger.info(`Deleting original MKV file: ${path.basename(inputPath)}`);
+            Logger.debug(`Deleting original MKV file: ${path.basename(inputPath)}`);
             await FileSystemUtils.unlink(inputPath);
-            Logger.info("Original MKV file deleted successfully");
+            Logger.debug("Original MKV file deleted successfully");
           }
           return true;
         }
@@ -497,7 +507,7 @@ export class HandBrakeService {
         if (outputPath && fs.existsSync(outputPath)) {
           const stats = fs.statSync(outputPath);
           if (stats.size === 0 || stats.size < HANDBRAKE_CONSTANTS.VALIDATION.MIN_OUTPUT_SIZE_BYTES) {
-            Logger.info("Removing incomplete output file...");
+            Logger.debug("Removing incomplete output file...");
             fs.unlinkSync(outputPath);
           }
         }

@@ -18,12 +18,31 @@ export const colors = {
     underline: chalk.white.underline,
   },
   blue: chalk.blue,
+  debug: chalk.gray,
 };
 
 /**
  * Logger utility class for consistent logging throughout the application
  */
 export class Logger {
+  static #verbose = false;
+
+  /**
+   * Enable or disable verbose/debug logging
+   * @param {boolean} enabled - Whether verbose logging should be enabled
+   */
+  static setVerbose(enabled) {
+    Logger.#verbose = !!enabled;
+  }
+
+  /**
+   * Check if verbose logging is enabled
+   * @returns {boolean} Whether verbose logging is enabled
+   */
+  static isVerbose() {
+    return Logger.#verbose;
+  }
+
   static info(message, title = null) {
     const timeFormat =
       AppConfig.logTimeFormat === "12hr" ? "h:mm:ss a" : "HH:mm:ss";
@@ -35,6 +54,28 @@ export class Logger {
       console.info(`${timestamp}${dash}${infoText}${colors.title(title)}`);
     } else {
       console.info(`${timestamp}${dash}${infoText}`);
+    }
+  }
+
+  /**
+   * Log a debug message (only shown when verbose mode is enabled)
+   * @param {string} message - The debug message to log
+   * @param {string} [title] - Optional title to append
+   */
+  static debug(message, title = null) {
+    if (!Logger.#verbose) {
+      return;
+    }
+    const timeFormat =
+      AppConfig.logTimeFormat === "12hr" ? "h:mm:ss a" : "HH:mm:ss";
+    const timestamp = colors.time(format(new Date(), timeFormat));
+    const dash = colors.dash(" - ");
+    const debugText = colors.debug(`[DEBUG] ${message}`);
+
+    if (title) {
+      console.info(`${timestamp}${dash}${debugText}${colors.title(title)}`);
+    } else {
+      console.info(`${timestamp}${dash}${debugText}`);
     }
   }
 

@@ -241,28 +241,22 @@ export class AppConfig {
       );
     }
 
-    // Load and validate HandBrake configuration
+    // Load and validate HandBrake configuration using centralized validation
     const config = this.#loadConfig();
     Logger.info("Checking HandBrake configuration...");
     if (config.handbrake?.enabled) {
       Logger.info("HandBrake post-processing is enabled");
       const handbrakeConfig = this.handbrake;
 
-      // Validate output format
-      if (!['mp4', 'm4v'].includes(handbrakeConfig.output_format.toLowerCase())) {
+      // Use centralized validation from handbrake-config.js
+      const validationResult = validateHandBrakeConfig(handbrakeConfig);
+      if (!validationResult.isValid) {
         throw new Error(
-          `Invalid HandBrake output format: ${handbrakeConfig.output_format}. Must be 'mp4' or 'm4v'.`
+          `HandBrake configuration error: ${validationResult.errors.join(', ')}`
         );
       }
 
-      // Validate preset
-      if (!handbrakeConfig.preset || handbrakeConfig.preset.trim() === '') {
-        throw new Error(
-          'HandBrake preset must be specified when HandBrake post-processing is enabled.'
-        );
-      }
-
-      // If cli_path is specified, make sure it exists
+      // If cli_path is specified, verify the file exists (filesystem check)
       if (handbrakeConfig.cli_path) {
         const cliPath = normalize(handbrakeConfig.cli_path);
         try {

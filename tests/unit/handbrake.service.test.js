@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
+import { open, stat } from "fs/promises";
 import path from "path";
 import { HandBrakeService, HandBrakeError } from "../../src/services/handbrake.service.js";
 import { AppConfig } from "../../src/config/index.js";
@@ -8,6 +9,7 @@ import { exec } from "child_process";
 
 // Mock dependencies
 vi.mock("fs");
+vi.mock("fs/promises");
 vi.mock("child_process");
 vi.mock("../../src/utils/logger.js");
 vi.mock("../../src/utils/filesystem.js");
@@ -47,8 +49,10 @@ describe("HandBrakeService", () => {
     };
 
     Logger.info = vi.fn();
+    Logger.debug = vi.fn();
     Logger.error = vi.fn();
     Logger.warn = vi.fn();
+    Logger.warning = vi.fn();
   });
 
   describe("validateConfig", () => {
@@ -127,30 +131,37 @@ describe("HandBrakeService", () => {
 
   describe("validateOutput", () => {
     it("should pass validation for valid file", async () => {
-      fs.existsSync.mockReturnValue(true);
-      fs.statSync.mockReturnValue({ size: 100 * 1024 * 1024 }); // 100MB
-      fs.openSync.mockReturnValue(3);
-      fs.readSync.mockReturnValue(1024);
-      fs.closeSync.mockImplementation(() => { });
+      // Mock fs/promises stat to return file info
+      stat.mockResolvedValue({ size: 100 * 1024 * 1024 }); // 100MB
 
-      const buffer = Buffer.from("0000001866747970", "hex"); // Valid MP4 header
-      fs.readSync.mockImplementation((fd, buf) => {
-        buffer.copy(buf);
-        return 1024;
-      });
+      // Mock fs/promises open to return a file handle
+      const mockFileHandle = {
+        read: vi.fn().mockImplementation((buffer) => {
+          // Write valid MP4 header to buffer
+          const header = Buffer.from("0000001866747970", "hex");
+          header.copy(buffer);
+          return Promise.resolve({ bytesRead: 1024 });
+        }),
+        close: vi.fn().mockResolvedValue()
+      };
+      open.mockResolvedValue(mockFileHandle);
 
       await expect(HandBrakeService.validateOutput("/test/output.mp4")).resolves.not.toThrow();
+      expect(mockFileHandle.close).toHaveBeenCalled();
     });
 
     it("should throw error if file doesn't exist", async () => {
-      fs.existsSync.mockReturnValue(false);
+      // Mock fs/promises stat to throw ENOENT error
+      const error = new Error("ENOENT: no such file or directory");
+      error.code = "ENOENT";
+      stat.mockRejectedValue(error);
 
       await expect(HandBrakeService.validateOutput("/test/output.mp4")).rejects.toThrow(/output file not created/);
     });
 
     it("should throw error for empty file", async () => {
-      fs.existsSync.mockReturnValue(true);
-      fs.statSync.mockReturnValue({ size: 0 });
+      // Mock fs/promises stat to return 0 size
+      stat.mockResolvedValue({ size: 0 });
 
       await expect(HandBrakeService.validateOutput("/test/output.mp4")).rejects.toThrow(/output file is empty/);
     });
