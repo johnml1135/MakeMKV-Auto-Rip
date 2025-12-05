@@ -46,7 +46,7 @@ ripping:
 # HandBrake post-processing settings
 handbrake:
   # Enable HandBrake post-processing after ripping (true/false)
-  enabled: true
+  enabled: false
   # Path to HandBrakeCLI executable
   # Leave empty or comment out to use automatic detection based on your platform
   # IMPORTANT: HandBrakeCLI is a SEPARATE download from the GUI (different installer/package)
