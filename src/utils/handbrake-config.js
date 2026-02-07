@@ -46,6 +46,49 @@ export function validateHandBrakeConfig(config) {
     if (config.additional_args && typeof config.additional_args !== 'string') {
       errors.push('additional_args must be a string');
     }
+
+    // Validate subtitles config if provided
+    if (config.subtitles !== undefined) {
+      if (!config.subtitles || typeof config.subtitles !== 'object' || Array.isArray(config.subtitles)) {
+        errors.push('subtitles must be an object');
+      } else {
+        const subtitles = config.subtitles;
+
+        if (subtitles.enabled !== undefined && typeof subtitles.enabled !== 'boolean') {
+          errors.push('subtitles.enabled must be a boolean');
+        }
+
+        if (subtitles.all !== undefined && typeof subtitles.all !== 'boolean') {
+          errors.push('subtitles.all must be a boolean');
+        }
+
+        if (subtitles.lang_list !== undefined && typeof subtitles.lang_list !== 'string') {
+          errors.push('subtitles.lang_list must be a string');
+        }
+
+        if (typeof subtitles.lang_list === 'string' && subtitles.lang_list.trim() !== '') {
+          // Basic safety validation: ISO 639-2 codes and/or 'any' separated by commas
+          const value = subtitles.lang_list.trim();
+          if (!/^[A-Za-z]{3}(?:,(?:[A-Za-z]{3}|any))*$/.test(value)) {
+            errors.push('subtitles.lang_list must be a comma separated list of ISO 639-2 codes (e.g. "eng,spa") and/or "any"');
+          }
+        }
+
+        if (subtitles.default !== undefined) {
+          const def = String(subtitles.default).trim();
+          if (!(def === '' || def === 'none' || /^[1-9]\d*$/.test(def))) {
+            errors.push('subtitles.default must be a positive integer or "none"');
+          }
+        }
+
+        if (subtitles.burned !== undefined) {
+          const burned = String(subtitles.burned).trim();
+          if (!(burned === '' || burned === 'auto' || burned === 'none' || burned === 'native' || /^[1-9]\d*$/.test(burned))) {
+            errors.push('subtitles.burned must be a positive integer, "native", "auto", or "none"');
+          }
+        }
+      }
+    }
   }
 
   return {
@@ -65,7 +108,19 @@ export function getDefaultHandBrakeConfig() {
     preset: "Fast 1080p30",
     output_format: "mp4",
     delete_original: false,
-    additional_args: ""
+    additional_args: "",
+    subtitles: {
+      enabled: true,
+      // Include all subtitles, and prefer English by ordering it first.
+      // 'any' ensures we still pick up non-English subtitles.
+      lang_list: "eng,any",
+      all: true,
+      // Make the first selected subtitle the default (usually English when present)
+      default: "1",
+      // Text-first behavior: keep soft subtitles when possible; burn bitmap subs only if needed.
+      // Set to "none" to never burn, or "1"/"native" to always burn.
+      burned: "auto"
+    }
   };
 }
 

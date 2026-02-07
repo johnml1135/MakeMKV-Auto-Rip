@@ -273,7 +273,33 @@ handbrake:
   # Delete original MKV file after successful conversion (true/false)
   delete_original: true
 
+   # Subtitle handling (HandBrakeCLI)
+   subtitles:
+      # Enable/disable automatic subtitle selection (true/false)
+      enabled: true
+      # Preferred subtitle languages (comma-separated ISO 639-2 codes).
+      # Tip: include "any" to keep *all* subtitle languages, while still preferring English first.
+      # Default: "eng,any"
+      lang_list: "eng,any"
+      # Select all subtitle tracks that match the language list (true/false)
+      all: true
+      # Which selected subtitle to mark as default (number or "none")
+      default: "1"
+      # Burn a selected subtitle into the video (number, "native", or "none")
+      # Use "auto" to prefer text subtitles as soft tracks, but burn bitmap subs when MP4 can't keep them.
+      burned: "auto"
+
   # Additional HandBrake CLI arguments (advanced users only)
+   #
+   # Subtitles note:
+   # - HandBrakeCLI may NOT include subtitle tracks unless you tell it to.
+   # - MP4/M4V containers generally cannot carry bitmap subtitles (Blu-ray PGS / DVD VobSub) as soft subtitles.
+   #   For those, you typically need to burn them in, or keep the original MKV.
+   #
+   # Examples:
+   # - Keep all subtitles (best for text-based subs): "--all-subtitles"
+   # - Keep all English subtitles: "--subtitle-lang-list eng --all-subtitles"
+   # - Burn subtitles into the video (useful for PGS/VobSub): "--subtitle-lang-list eng --all-subtitles --subtitle-burned"
   additional_args: ""
 
 # Interface behavior settings
@@ -338,8 +364,20 @@ makemkv:
     - See [HandBrake documentation](https://handbrake.fr/docs/en/latest/technical/official-presets.html) for more presets
   - **`handbrake.output_format`** - Output container format (`"mp4"` or `"m4v"`)
   - **`handbrake.delete_original`** - Delete original MKV after successful conversion (`true` or `false`)
+   - **`handbrake.subtitles.enabled`** - Enable/disable automatic subtitle selection (`true` or `false`)
+   - **`handbrake.subtitles.lang_list`** - Comma-separated ISO 639-2 subtitle language codes (e.g. `"eng,spa"`)
+      - Tip: include `"any"` to keep all subtitle languages while still preferring English first (default: `"eng,any"`)
+   - **`handbrake.subtitles.all`** - Include all subtitle tracks matching the language list (`true`), or only the first match (`false`)
+   - **`handbrake.subtitles.default`** - Which selected subtitle to mark as default (`"1"`, `"2"`, ... or `"none"`)
+   - **`handbrake.subtitles.burned`** - Burn a selected subtitle into the video (`"1"`, `"native"`, `"auto"`, or `"none"`)
   - **`handbrake.additional_args`** - Additional HandBrakeCLI arguments for advanced users
-    - Example: `"--audio-lang-list eng --all-audio"`
+      - Subtitles note: MP4/M4V containers generally cannot carry bitmap subtitles (Blu-ray PGS / DVD VobSub) as soft subtitles.
+         - For those, you typically need to burn them in, or keep the original MKV.
+      - Subtitles examples:
+         - Keep all subtitles (best for text-based subs): `--all-subtitles`
+         - Keep all English subtitles: `--subtitle-lang-list eng --all-subtitles`
+         - Burn subtitles into the video (useful for PGS/VobSub): `--subtitle-lang-list eng --all-subtitles --subtitle-burned`
+      - Audio example: `--audio-lang-list eng --all-audio`
 
 ### HandBrake Error Handling & Retry Logic
 

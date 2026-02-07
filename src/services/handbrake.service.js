@@ -12,6 +12,23 @@ import { validateHandBrakeConfig } from "../utils/handbrake-config.js";
 
 const execAsync = promisify(exec);
 
+const TEXT_SUBTITLE_HINTS = [
+  'srt',
+  'subrip',
+  'ssa',
+  'ass',
+  'tx3g',
+  'text'
+];
+
+const BITMAP_SUBTITLE_HINTS = [
+  'pgs',
+  'vobsub',
+  'dvd',
+  'bitmap',
+  'hdmv'
+];
+
 /**
  * Error class for HandBrake-specific errors
  * @extends Error
@@ -33,6 +50,148 @@ export class HandBrakeError extends Error {
  * Service for handling HandBrake post-processing operations
  */
 export class HandBrakeService {
+  static extractJsonObjects(text) {
+    const objects = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escape = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch === '\\') {
+          escape = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '{') {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (ch === '}') {
+        if (depth > 0) depth--;
+        if (depth === 0 && start !== -1) {
+          const candidate = text.slice(start, i + 1);
+          try {
+            objects.push(JSON.parse(candidate));
+          } catch {
+            // ignore parse failures; output often includes non-JSON log text
+          }
+          start = -1;
+        }
+      }
+    }
+
+    return objects;
+  }
+
+  static normalizeIso639_2(value) {
+    if (!value) return null;
+    const s = String(value).trim().toLowerCase();
+    if (s.length === 3) return s;
+    // Common language names we care about
+    if (s.startsWith('english')) return 'eng';
+    if (s.startsWith('spanish')) return 'spa';
+    if (s.startsWith('french')) return 'fre';
+    if (s.startsWith('german')) return 'ger';
+    return null;
+  }
+
+  static parseLangList(langList) {
+    const raw = (langList || '').trim();
+    if (!raw) return ['eng', 'any'];
+    return raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  }
+
+  static subtitleIsText(track) {
+    const blob = JSON.stringify(track || {}).toLowerCase();
+    return TEXT_SUBTITLE_HINTS.some(h => blob.includes(h));
+  }
+
+  static subtitleIsBitmap(track) {
+    const blob = JSON.stringify(track || {}).toLowerCase();
+    return BITMAP_SUBTITLE_HINTS.some(h => blob.includes(h));
+  }
+
+  static subtitleTrackLang(track) {
+    // HandBrake JSON tends to include one of these, depending on build
+    const candidate = track?.Language || track?.Lang || track?.language || track?.lang || track?.LanguageCode;
+    return this.normalizeIso639_2(candidate);
+  }
+
+  static trackMatchesLang(trackLang, allowed) {
+    if (!allowed || allowed.length === 0) return true;
+    if (allowed.includes('any')) return true;
+    if (!trackLang) return false;
+    return allowed.includes(trackLang);
+  }
+
+  /**
+   * Decide whether to burn subtitles when subtitles.burned is set to "auto".
+   * Text subtitles are preferred (soft subs). Bitmap-only sources fall back to burning.
+   * @private
+   */
+  static async decideAutoBurn(handBrakePath, inputPath) {
+    try {
+      const config = AppConfig.handbrake;
+      const subtitles = config.subtitles || {};
+      const langList = this.parseLangList(subtitles.lang_list);
+
+      // Scan input and request JSON output.
+      const cmd = [
+        `"${this.sanitizePath(handBrakePath)}"`,
+        `--input "${this.sanitizePath(inputPath)}"`,
+        '--title 1',
+        '--scan',
+        '--json'
+      ].join(' ');
+
+      const { stdout, stderr } = await execAsync(cmd, {
+        timeout: 5 * 60 * 1000,
+        maxBuffer: 1024 * 1024 * 10
+      });
+
+      const jsonObjects = this.extractJsonObjects(`${stdout}\n${stderr}`);
+      // Find any object with a TitleList (most common)
+      const hb = jsonObjects.find(o => o && (o.TitleList || o?.titleList || o?.Titles)) || jsonObjects[0];
+      const titleList = hb?.TitleList || hb?.titleList || hb?.Titles || [];
+      const title = Array.isArray(titleList) ? titleList[0] : null;
+      const subtitleList = title?.Subtitles || title?.subtitles || [];
+
+      if (!Array.isArray(subtitleList) || subtitleList.length === 0) {
+        return { burn: false, reason: 'no_subtitles_detected' };
+      }
+
+      const matching = subtitleList.filter(track => this.trackMatchesLang(this.subtitleTrackLang(track), langList));
+      const matchingText = matching.filter(t => this.subtitleIsText(t));
+      const matchingBitmap = matching.filter(t => this.subtitleIsBitmap(t));
+
+      if (matchingText.length > 0) {
+        return { burn: false, reason: 'text_subtitles_available' };
+      }
+
+      if (matchingBitmap.length > 0) {
+        return { burn: true, reason: 'bitmap_only_fallback' };
+      }
+
+      // Unknown type: do not burn by default.
+      return { burn: false, reason: 'unknown_subtitle_type' };
+    } catch (error) {
+      Logger.warning(`Subtitle scan failed, defaulting to no-burn: ${error.message}`);
+      return { burn: false, reason: 'scan_failed' };
+    }
+  }
   /**
    * Retry a conversion with fallback preset on failure
    * @param {string} inputPath - Path to input file
@@ -42,7 +201,7 @@ export class HandBrakeService {
    * @returns {Promise<boolean>} Success status
    * @private
    */
-  static async retryConversion(inputPath, outputPath, handBrakePath, retryCount = 0) {
+  static async retryConversion(inputPath, outputPath, handBrakePath, retryCount = 0, subtitleOverride = null) {
     const { MAX_ATTEMPTS, FALLBACK_PRESETS } = HANDBRAKE_CONSTANTS.RETRY;
 
     if (retryCount >= MAX_ATTEMPTS) {
@@ -57,7 +216,7 @@ export class HandBrakeService {
       Logger.info(`Retry attempt ${retryCount + 1} with preset: ${fallbackPreset}`);
 
       // Build command with override preset - no config mutation
-      const command = this.buildCommand(handBrakePath, inputPath, outputPath, fallbackPreset);
+      const command = this.buildCommand(handBrakePath, inputPath, outputPath, fallbackPreset, subtitleOverride);
 
       const { stdout, stderr } = await execAsync(command, {
         timeout: HANDBRAKE_CONSTANTS.MIN_TIMEOUT_HOURS * HANDBRAKE_CONSTANTS.TIMEOUT.MS_PER_HOUR,
@@ -74,7 +233,7 @@ export class HandBrakeService {
       Logger.warning(`Retry ${retryCount + 1} failed: ${error.message}`);
 
       // Try again with next fallback preset
-      return await this.retryConversion(inputPath, outputPath, handBrakePath, retryCount + 1);
+      return await this.retryConversion(inputPath, outputPath, handBrakePath, retryCount + 1, subtitleOverride);
     }
   }
   /**
@@ -242,7 +401,7 @@ export class HandBrakeService {
    * @throws {HandBrakeError} If paths contain invalid characters
    * @private
    */
-  static buildCommand(handBrakePath, inputPath, outputPath, presetOverride = null) {
+  static buildCommand(handBrakePath, inputPath, outputPath, presetOverride = null, subtitleOverride = null) {
     const config = AppConfig.handbrake;
     const preset = presetOverride || config.preset;
 
@@ -271,17 +430,57 @@ export class HandBrakeService {
       args.push('--optimize');
     }
 
+    // Subtitles: include all by default, prefer English via language list ordering.
+    // If the user supplies explicit subtitle-related flags in additional_args, do not auto-add.
+    const additionalArgsRaw = (config.additional_args || '').trim();
+    const hasSubtitleOverrides = /\B--(?:all-subtitles|first-subtitle|subtitle(?:-lang-list)?|subtitle-default|subtitle-burned|subtitle-forced|native-language)\b/i.test(additionalArgsRaw);
+    const subtitlesConfig = config.subtitles || {};
+    const subtitlesEnabled = subtitlesConfig.enabled !== false;
+
+    if (subtitlesEnabled && !hasSubtitleOverrides) {
+      const langList = typeof subtitlesConfig.lang_list === 'string' && subtitlesConfig.lang_list.trim() !== ''
+        ? subtitlesConfig.lang_list.trim()
+        : 'eng,any';
+
+      args.push(`--subtitle-lang-list ${langList}`);
+
+      const overrideBurned = subtitleOverride?.burned !== undefined ? String(subtitleOverride.burned).trim() : null;
+      const isBurning = overrideBurned && overrideBurned !== '' && overrideBurned !== 'none' && overrideBurned !== 'auto';
+
+      // If burning is enabled, only one subtitle track can be burned. Pick the first matching track.
+      if (isBurning) {
+        args.push('--first-subtitle');
+      } else if (subtitlesConfig.all !== false) {
+        args.push('--all-subtitles');
+      } else {
+        args.push('--first-subtitle');
+      }
+
+      const subtitleDefault = subtitlesConfig.default !== undefined ? String(subtitlesConfig.default).trim() : '1';
+      if (subtitleDefault !== '') {
+        args.push(`--subtitle-default=${subtitleDefault}`);
+      }
+
+      const subtitleBurned = overrideBurned !== null
+        ? overrideBurned
+        : (subtitlesConfig.burned !== undefined ? String(subtitlesConfig.burned).trim() : 'none');
+      // "auto" is handled in convertFile via a scan; buildCommand treats it as "none".
+      if (subtitleBurned !== '' && subtitleBurned !== 'none' && subtitleBurned !== 'auto') {
+        args.push(`--subtitle-burned=${subtitleBurned}`);
+      }
+    }
+
     // Add custom arguments if specified (with validation)
-    if (config.additional_args && config.additional_args.trim()) {
+    if (additionalArgsRaw) {
       // Validate additional args don't contain dangerous characters
-      if (/[;&|`$()<>\n\r]/.test(config.additional_args)) {
+      if (/[;&|`$()<>\n\r]/.test(additionalArgsRaw)) {
         throw new HandBrakeError(
           'Additional arguments contain unsafe shell characters',
-          `Invalid characters detected in: ${config.additional_args}`
+          `Invalid characters detected in: ${additionalArgsRaw}`
         );
       }
       // Split by space but respect quoted arguments
-      const customArgs = config.additional_args.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+      const customArgs = additionalArgsRaw.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
       args.push(...customArgs);
     }
 
@@ -388,6 +587,7 @@ export class HandBrakeService {
   static async convertFile(inputPath) {
     let outputPath; // Declare here to be accessible in catch block
     let command; // Declare here to be accessible in catch block
+    let subtitleOverride = null;
     try {
       if (!AppConfig.handbrake?.enabled) {
         Logger.info("HandBrake post-processing is disabled, skipping...");
@@ -430,7 +630,19 @@ export class HandBrakeService {
       Logger.debug(`Output will be saved as: ${path.basename(outputPath)}`);
       Logger.debug("This may take a while depending on the file size and preset used.");
 
-      command = this.buildCommand(handBrakePath, inputPath, outputPath);
+      // Text-first subtitle behavior: if configured for "auto", scan the source.
+      if (AppConfig.handbrake?.subtitles?.enabled !== false) {
+        const burnedMode = String(AppConfig.handbrake.subtitles?.burned ?? 'none').trim();
+        if (burnedMode === 'auto') {
+          const subtitleAutoDecision = await this.decideAutoBurn(handBrakePath, inputPath);
+          if (subtitleAutoDecision?.burn) {
+            Logger.info('Bitmap subtitles detected (no text subs). Falling back to burning subtitles into the video.');
+            subtitleOverride = { burned: '1' };
+          }
+        }
+      }
+
+      command = this.buildCommand(handBrakePath, inputPath, outputPath, null, subtitleOverride);
       Logger.debug(`Executing command: ${command}`);
 
       // Set timeout based on file size (rough estimate: 2 hours + 1 minute per GB)
@@ -487,7 +699,7 @@ export class HandBrakeService {
 
       try {
         const handBrakePath = await this.getHandBrakePath();
-        const retrySuccess = await this.retryConversion(inputPath, outputPath, handBrakePath, 0);
+        const retrySuccess = await this.retryConversion(inputPath, outputPath, handBrakePath, 0, subtitleOverride);
 
         if (retrySuccess) {
           // Successful retry - check if we should delete original

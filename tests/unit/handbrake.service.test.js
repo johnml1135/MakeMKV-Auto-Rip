@@ -23,7 +23,14 @@ vi.mock("../../src/config/index.js", () => ({
       preset: "Fast 1080p30",
       output_format: "mp4",
       delete_original: false,
-      additional_args: ""
+      additional_args: "",
+      subtitles: {
+        enabled: true,
+        lang_list: "eng,any",
+        all: true,
+        default: "1",
+        burned: "auto"
+      }
     }
   }
 }));
@@ -45,7 +52,14 @@ describe("HandBrakeService", () => {
       preset: "Fast 1080p30",
       output_format: "mp4",
       delete_original: false,
-      additional_args: ""
+      additional_args: "",
+      subtitles: {
+        enabled: true,
+        lang_list: "eng,any",
+        all: true,
+        default: "1",
+        burned: "auto"
+      }
     };
 
     Logger.info = vi.fn();
@@ -114,6 +128,9 @@ describe("HandBrakeService", () => {
       expect(cmd).toContain('--input "/input/test.mkv"');
       expect(cmd).toContain('--output "/output/test.mp4"');
       expect(cmd).toContain('--preset "Fast 1080p30"');
+      expect(cmd).toContain('--subtitle-lang-list eng,any');
+      expect(cmd).toContain('--all-subtitles');
+      expect(cmd).toContain('--subtitle-default=1');
     });
 
     it("should include optimization for MP4 format", () => {

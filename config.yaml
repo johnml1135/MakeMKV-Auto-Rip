@@ -46,7 +46,7 @@ ripping:
 # HandBrake post-processing settings
 handbrake:
   # Enable HandBrake post-processing after ripping (true/false)
-  enabled: false
+  enabled: true
   # Path to HandBrakeCLI executable
   # Leave empty or comment out to use automatic detection based on your platform
   # IMPORTANT: HandBrakeCLI is a SEPARATE download from the GUI (different installer/package)
@@ -60,7 +60,34 @@ handbrake:
   output_format: "mp4"
   # Delete original MKV file after successful conversion (true/false)
   delete_original: true
+
+  # Subtitle handling (HandBrakeCLI)
+  subtitles:
+    # Enable/disable automatic subtitle selection (true/false)
+    enabled: true
+    # Preferred subtitle languages (comma-separated ISO 639-2 codes).
+    # Tip: include "any" to keep *all* subtitle languages, while still preferring English first.
+    # Default: "eng,any"
+    lang_list: "eng,any"
+    # Select all subtitle tracks that match the language list (true/false)
+    all: true
+    # Which selected subtitle to mark as default (number or "none").
+    # "1" typically becomes English when present due to lang_list ordering.
+    default: "1"
+    # Burn a selected subtitle into the video (number, "native", or "none")
+    # Use "auto" to prefer text subtitles as soft tracks, but burn bitmap subs when MP4 can't keep them.
+    burned: "auto"
   # Additional HandBrake CLI arguments (advanced users only)
+  #
+  # Subtitles note:
+  # - By default, HandBrakeCLI may NOT include subtitle tracks unless you tell it to.
+  # - MP4/M4V containers generally cannot carry Blu-ray/DVD bitmap subtitles (PGS/VobSub) as soft subtitles.
+  #   For those, you typically need to burn them in, or keep the original MKV.
+  #
+  # Examples:
+  # - Try to include all subtitles (works best for text-based subs): "--all-subtitles"
+  # - Include all English subtitles: "--subtitle-lang-list eng --all-subtitles"
+  # - Burn the first selected subtitle track into the video (useful for PGS/VobSub): "--subtitle-lang-list eng --all-subtitles --subtitle-burned"
   additional_args: ""
 
 # Interface behavior settings

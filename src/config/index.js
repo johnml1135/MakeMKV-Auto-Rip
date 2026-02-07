@@ -169,7 +169,14 @@ export class AppConfig {
         preset: "Fast 1080p30",
         output_format: "mp4",
         delete_original: false,
-        additional_args: ""
+        additional_args: "",
+        subtitles: {
+          enabled: true,
+          lang_list: "eng,any",
+          all: true,
+          default: "1",
+          burned: "auto"
+        }
       };
     }
 
@@ -179,7 +186,24 @@ export class AppConfig {
       preset: config.handbrake.preset || "Fast 1080p30",
       output_format: (config.handbrake.output_format || "mp4").toLowerCase(),
       delete_original: Boolean(config.handbrake.delete_original),
-      additional_args: config.handbrake.additional_args || ""
+      additional_args: config.handbrake.additional_args || "",
+      subtitles: {
+        enabled: config.handbrake.subtitles?.enabled !== undefined
+          ? Boolean(config.handbrake.subtitles.enabled)
+          : true,
+        lang_list: typeof config.handbrake.subtitles?.lang_list === 'string' && config.handbrake.subtitles.lang_list.trim() !== ''
+          ? config.handbrake.subtitles.lang_list.trim()
+          : "eng,any",
+        all: config.handbrake.subtitles?.all !== undefined
+          ? Boolean(config.handbrake.subtitles.all)
+          : true,
+        default: config.handbrake.subtitles?.default !== undefined
+          ? String(config.handbrake.subtitles.default).trim()
+          : "1",
+        burned: config.handbrake.subtitles?.burned !== undefined
+          ? String(config.handbrake.subtitles.burned).trim()
+          : "none"
+      }
     };
   }
 
