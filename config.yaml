@@ -39,7 +39,7 @@ mount_detection:
 # Ripping behavior settings
 ripping:
   # Rip all titles (over the MakeMKV minimum length) from disc instead of just the longest title (true/false)
-  rip_all_titles: false
+  rip_all_titles: true
   # Ripping mode - async for parallel processing, sync for sequential (async/sync)
   mode: "async"
 
