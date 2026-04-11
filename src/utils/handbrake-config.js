@@ -83,8 +83,8 @@ export function validateHandBrakeConfig(config) {
 
         if (subtitles.burned !== undefined) {
           const burned = String(subtitles.burned).trim();
-          if (!(burned === '' || burned === 'auto' || burned === 'none' || burned === 'native' || /^[1-9]\d*$/.test(burned))) {
-            errors.push('subtitles.burned must be a positive integer, "native", "auto", or "none"');
+          if (!(burned === '' || burned === 'none')) {
+            errors.push('subtitles.burned must be "none". Subtitle burn-in is not supported.');
           }
         }
       }
@@ -117,9 +117,8 @@ export function getDefaultHandBrakeConfig() {
       all: true,
       // Make the first selected subtitle the default (usually English when present)
       default: "1",
-      // Text-first behavior: keep soft subtitles when possible; burn bitmap subs only if needed.
-      // Set to "none" to never burn, or "1"/"native" to always burn.
-      burned: "auto"
+      // Keep subtitle tracks as selectable soft subtitles only.
+      burned: "none"
     }
   };
 }

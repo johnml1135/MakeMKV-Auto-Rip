@@ -47,6 +47,10 @@ TINFO:2,9,0,"2:15:30"`;
         callback(null, "", "");
       }
     }),
+    execFile: vi.fn((file, args, options, callback) => {
+      const cb = typeof options === "function" ? options : callback;
+      cb(null, "", "");
+    }),
   };
 });
 

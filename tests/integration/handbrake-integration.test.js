@@ -116,6 +116,6 @@ describe("HandBrake Integration Tests", () => {
         mockMkvFile,
         path.join(testDir, "output.mp4")
       );
-    }).toThrow(/unsafe shell characters/);
+    }).toThrow(/unsafe shell operators/);
   });
 });

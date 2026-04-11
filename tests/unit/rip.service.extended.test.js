@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import path from "path";
 import { RipService } from "../../src/services/rip.service.js";
 
 // Mock all dependencies
@@ -206,7 +207,7 @@ describe("RipService - Extended Coverage", () => {
       expect(ripService.goodHandBrakeArray).toContain("movie.mkv");
     });
 
-    it("should skip non-MKV files", async () => {
+    it("should warn when no MKV files are present", async () => {
       const mockStdout = 'MSG:5014,0,0,0,0,"Saving 1 titles into directory file:///test/output/Movie"\nMSG:5036,0,1,"Copy complete."';
       const mockDisc = { title: "TestMovie" };
 
@@ -214,10 +215,23 @@ describe("RipService - Extended Coverage", () => {
 
       await ripService.handleRipCompletion(mockStdout, mockDisc);
 
-      expect(Logger.info).toHaveBeenCalledWith(
-        expect.stringContaining("Skipping non-MKV file")
+      expect(Logger.warning).toHaveBeenCalledWith(
+        expect.stringContaining("No MKV files found in output folder")
       );
       expect(HandBrakeService.convertFile).not.toHaveBeenCalled();
+    });
+
+    it("should parse Windows-style output paths with spaces from MakeMKV logs", async () => {
+      const mockStdout = 'MSG:5014,131072,2,"Saving 1 titles into directory file://G:\\movies\\Narnia Volume 3","Saving %1 titles into directory %2","1","file://G:\\movies\\Narnia Volume 3"\nMSG:5036,0,1,"Copy complete."';
+      const mockDisc = { title: "TestMovie" };
+
+      FileSystemUtils.readdir.mockResolvedValue(["movie.mkv"]);
+
+      await ripService.handleRipCompletion(mockStdout, mockDisc);
+
+      expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
+        expect.stringContaining(`Narnia Volume 3${path.sep}movie.mkv`)
+      );
     });
 
     it("should track failed HandBrake conversions", async () => {

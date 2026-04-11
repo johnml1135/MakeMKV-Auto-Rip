@@ -285,21 +285,19 @@ handbrake:
       all: true
       # Which selected subtitle to mark as default (number or "none")
       default: "1"
-      # Burn a selected subtitle into the video (number, "native", or "none")
-      # Use "auto" to prefer text subtitles as soft tracks, but burn bitmap subs when MP4 can't keep them.
-      burned: "auto"
+      # Keep subtitles as selectable tracks only. Burn-in is not supported.
+      burned: "none"
 
   # Additional HandBrake CLI arguments (advanced users only)
    #
    # Subtitles note:
    # - HandBrakeCLI may NOT include subtitle tracks unless you tell it to.
    # - MP4/M4V containers generally cannot carry bitmap subtitles (Blu-ray PGS / DVD VobSub) as soft subtitles.
-   #   For those, you typically need to burn them in, or keep the original MKV.
+   #   This project does not burn subtitles into the video, so keep the original MKV when those tracks matter.
    #
    # Examples:
    # - Keep all subtitles (best for text-based subs): "--all-subtitles"
    # - Keep all English subtitles: "--subtitle-lang-list eng --all-subtitles"
-   # - Burn subtitles into the video (useful for PGS/VobSub): "--subtitle-lang-list eng --all-subtitles --subtitle-burned"
   additional_args: ""
 
 # Interface behavior settings
@@ -369,14 +367,13 @@ makemkv:
       - Tip: include `"any"` to keep all subtitle languages while still preferring English first (default: `"eng,any"`)
    - **`handbrake.subtitles.all`** - Include all subtitle tracks matching the language list (`true`), or only the first match (`false`)
    - **`handbrake.subtitles.default`** - Which selected subtitle to mark as default (`"1"`, `"2"`, ... or `"none"`)
-   - **`handbrake.subtitles.burned`** - Burn a selected subtitle into the video (`"1"`, `"native"`, `"auto"`, or `"none"`)
+   - **`handbrake.subtitles.burned`** - Subtitle burn-in is disabled; keep this set to `"none"`
   - **`handbrake.additional_args`** - Additional HandBrakeCLI arguments for advanced users
       - Subtitles note: MP4/M4V containers generally cannot carry bitmap subtitles (Blu-ray PGS / DVD VobSub) as soft subtitles.
-         - For those, you typically need to burn them in, or keep the original MKV.
+         - This project does not burn subtitles into the video, so keep the original MKV when those tracks matter.
       - Subtitles examples:
          - Keep all subtitles (best for text-based subs): `--all-subtitles`
          - Keep all English subtitles: `--subtitle-lang-list eng --all-subtitles`
-         - Burn subtitles into the video (useful for PGS/VobSub): `--subtitle-lang-list eng --all-subtitles --subtitle-burned`
       - Audio example: `--audio-lang-list eng --all-audio`
 
 ### HandBrake Error Handling & Retry Logic

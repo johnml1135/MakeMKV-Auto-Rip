@@ -5,7 +5,6 @@ import path from "path";
 import { HandBrakeService, HandBrakeError } from "../../src/services/handbrake.service.js";
 import { AppConfig } from "../../src/config/index.js";
 import { Logger } from "../../src/utils/logger.js";
-import { exec } from "child_process";
 
 // Mock dependencies
 vi.mock("fs");
@@ -29,7 +28,7 @@ vi.mock("../../src/config/index.js", () => ({
         lang_list: "eng,any",
         all: true,
         default: "1",
-        burned: "auto"
+        burned: "none"
       }
     }
   }
@@ -58,7 +57,7 @@ describe("HandBrakeService", () => {
         lang_list: "eng,any",
         all: true,
         default: "1",
-        burned: "auto"
+        burned: "none"
       }
     };
 
@@ -87,6 +86,11 @@ describe("HandBrakeService", () => {
     it("should throw error for conflicting additional args", () => {
       const invalidConfig = { ...mockAppConfig.handbrake, additional_args: "--input test.mkv" };
       expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/conflicting options/);
+    });
+
+    it("should throw error for subtitle burn arguments", () => {
+      const invalidConfig = { ...mockAppConfig.handbrake, additional_args: "--subtitle-burned=1" };
+      expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/subtitle burn-in/i);
     });
   });
 
@@ -124,9 +128,9 @@ describe("HandBrakeService", () => {
         "/output/test.mp4"
       );
 
-      expect(cmd).toContain('"/usr/bin/HandBrakeCLI"');
-      expect(cmd).toContain('--input "/input/test.mkv"');
-      expect(cmd).toContain('--output "/output/test.mp4"');
+      expect(cmd).toContain('/usr/bin/HandBrakeCLI');
+      expect(cmd).toContain('--input /input/test.mkv');
+      expect(cmd).toContain('--output /output/test.mp4');
       expect(cmd).toContain('--preset "Fast 1080p30"');
       expect(cmd).toContain('--subtitle-lang-list eng,any');
       expect(cmd).toContain('--all-subtitles');
@@ -143,6 +147,39 @@ describe("HandBrakeService", () => {
       mockAppConfig.handbrake.additional_args = "--quality 22 --encoder x264";
       const cmd = HandBrakeService.buildCommand("/bin/hb", "in.mkv", "out.mp4");
       expect(cmd).toContain('--quality 22 --encoder x264');
+    });
+
+    it("should allow additional arguments with parentheses", () => {
+      mockAppConfig.handbrake.additional_args = '--encoder-preset "x264 (8-bit)"';
+
+      const cmd = HandBrakeService.buildCommand("/bin/hb", "in.mkv", "out.mp4");
+
+      expect(cmd).toContain('--encoder-preset "x264 (8-bit)"');
+    });
+
+    it("should never add subtitle burn-in flags", () => {
+      mockAppConfig.handbrake.subtitles.burned = "1";
+
+      const cmd = HandBrakeService.buildCommand("/bin/hb", "in.mkv", "out.mp4");
+
+      expect(cmd).not.toContain('--subtitle-burned');
+      expect(cmd).toContain('--all-subtitles');
+    });
+
+    it("should build executable and args separately for process execution", () => {
+      const commandParts = HandBrakeService.buildCommandParts("/bin/hb", "in.mkv", "out.mp4");
+
+      expect(commandParts.executable).toBe("/bin/hb");
+      expect(commandParts.args).toEqual(
+        expect.arrayContaining([
+          "--input",
+          "in.mkv",
+          "--output",
+          "out.mp4",
+          "--preset",
+          "Fast 1080p30"
+        ])
+      );
     });
   });
 
@@ -204,5 +241,18 @@ describe("HandBrakeService", () => {
       const result = await HandBrakeService.convertFile("/test/missing.mkv");
       expect(result).toBe(false);
     });
+
+    it("should skip retry when setup fails before command construction", async () => {
+      const retrySpy = vi.spyOn(HandBrakeService, "retryConversion").mockResolvedValue(false);
+      vi.spyOn(HandBrakeService, "getHandBrakePath").mockRejectedValue(
+        new HandBrakeError("HandBrakeCLI not found")
+      );
+
+      const result = await HandBrakeService.convertFile("/test/input.mkv");
+
+      expect(result).toBe(false);
+      expect(retrySpy).not.toHaveBeenCalled();
+    });
+
   });
 });

@@ -175,7 +175,7 @@ export class AppConfig {
           lang_list: "eng,any",
           all: true,
           default: "1",
-          burned: "auto"
+          burned: "none"
         }
       };
     }
@@ -200,9 +200,7 @@ export class AppConfig {
         default: config.handbrake.subtitles?.default !== undefined
           ? String(config.handbrake.subtitles.default).trim()
           : "1",
-        burned: config.handbrake.subtitles?.burned !== undefined
-          ? String(config.handbrake.subtitles.burned).trim()
-          : "none"
+        burned: "none"
       }
     };
   }
