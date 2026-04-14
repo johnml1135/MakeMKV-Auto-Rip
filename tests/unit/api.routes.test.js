@@ -1,30 +1,74 @@
 import { EventEmitter } from "events";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-const spawnMock = vi.fn();
 const detectAvailableDiscsMock = vi.fn();
+const loadDrivesWithWaitMock = vi.fn();
+const ejectAllDrivesMock = vi.fn();
+const prepareRipRuntimeMock = vi.fn();
+const startRippingMock = vi.fn();
+const requestCancelMock = vi.fn();
+const ripServiceCtorMock = vi.fn();
 const logger = {
   info: vi.fn(),
   error: vi.fn(),
   warning: vi.fn(),
+  addSink: vi.fn(() => () => {}),
 };
 const broadcastStatusUpdateMock = vi.fn();
 const broadcastLogMessageMock = vi.fn();
 
-vi.mock("child_process", () => ({
-  spawn: (...args) => spawnMock(...args),
-}));
-
 vi.mock("../../src/config/index.js", () => ({
   AppConfig: {
     mountPollInterval: 1,
+    validate: vi.fn().mockResolvedValue(),
   },
+}));
+
+vi.mock("../../src/app.js", () => ({
+  prepareRipRuntime: (...args) => prepareRipRuntimeMock(...args),
 }));
 
 vi.mock("../../src/services/disc.service.js", () => ({
   DiscService: {
     detectAvailableDiscs: (...args) => detectAvailableDiscsMock(...args),
   },
+}));
+
+vi.mock("../../src/services/drive.service.js", () => ({
+  DriveService: {
+    loadDrivesWithWait: (...args) => loadDrivesWithWaitMock(...args),
+    ejectAllDrives: (...args) => ejectAllDrivesMock(...args),
+  },
+}));
+
+class MockRipService {
+  constructor(options) {
+    ripServiceCtorMock(options);
+  }
+
+  startRipping(...args) {
+    return startRippingMock(...args);
+  }
+
+  requestCancel(...args) {
+    return requestCancelMock(...args);
+  }
+
+  wasCancelled() {
+    return false;
+  }
+
+  isCancellationRequested() {
+    return false;
+  }
+
+  isCancellationError() {
+    return false;
+  }
+}
+
+vi.mock("../../src/services/rip.service.js", () => ({
+  RipService: MockRipService,
 }));
 
 vi.mock("../../src/utils/logger.js", () => ({
@@ -63,22 +107,12 @@ function getRouteHandler(router, method, routePath) {
   return layer.route.stack[0].handle;
 }
 
-function createMockChildProcess() {
-  const childProcess = new EventEmitter();
-  childProcess.stdout = new EventEmitter();
-  childProcess.stderr = new EventEmitter();
-  childProcess.killed = false;
-  childProcess.kill = vi.fn((signal) => {
-    childProcess.killed = true;
-    childProcess.emit("close", signal === "SIGKILL" ? 137 : 0);
-  });
-  return childProcess;
-}
-
 describe("api routes rip mode", () => {
   let startRipHandler;
   let stopHandler;
   let statusHandler;
+  let loadHandler;
+  let ejectHandler;
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -90,6 +124,8 @@ describe("api routes rip mode", () => {
     startRipHandler = getRouteHandler(apiRoutes, "post", "/rip/start");
     stopHandler = getRouteHandler(apiRoutes, "post", "/stop");
     statusHandler = getRouteHandler(apiRoutes, "get", "/status");
+    loadHandler = getRouteHandler(apiRoutes, "post", "/drives/load");
+    ejectHandler = getRouteHandler(apiRoutes, "post", "/drives/eject");
   });
 
   afterEach(() => {
@@ -97,8 +133,8 @@ describe("api routes rip mode", () => {
   });
 
   it("stays in rip mode after a rip cycle completes", async () => {
-    const childProcess = createMockChildProcess();
-    spawnMock.mockReturnValue(childProcess);
+    prepareRipRuntimeMock.mockResolvedValue(undefined);
+    startRippingMock.mockResolvedValue(undefined);
     detectAvailableDiscsMock
       .mockResolvedValueOnce([{ title: "Movie", driveNumber: 0 }])
       .mockResolvedValueOnce([])
@@ -115,12 +151,17 @@ describe("api routes rip mode", () => {
 
     await vi.runAllTicks();
     await Promise.resolve();
-
-    expect(spawnMock).toHaveBeenCalledTimes(1);
-
-    childProcess.emit("close", 0);
     await Promise.resolve();
-    await Promise.resolve();
+
+    expect(prepareRipRuntimeMock).toHaveBeenCalledTimes(1);
+    expect(ripServiceCtorMock).toHaveBeenCalledWith({ exitOnCriticalError: false });
+
+    await vi.waitFor(() => {
+      expect(broadcastLogMessageMock).toHaveBeenCalledWith(
+        "success",
+        "Rip cycle completed successfully. Waiting for the next disc..."
+      );
+    });
 
     const statusRes = createResponse();
     await statusHandler({}, statusRes);
@@ -129,10 +170,6 @@ describe("api routes rip mode", () => {
     expect(statusRes.payload.canStop).toBe(true);
     expect(statusRes.payload.operation).toMatch(
       /Waiting for (current disc to be removed|disc insertion)\.\.\./
-    );
-    expect(broadcastLogMessageMock).toHaveBeenCalledWith(
-      "success",
-      "Rip cycle completed successfully. Waiting for the next disc..."
     );
   });
 
@@ -164,5 +201,79 @@ describe("api routes rip mode", () => {
     expect(stoppedStatusRes.payload.status).toBe("idle");
     expect(stoppedStatusRes.payload.canStop).toBe(false);
     expect(stoppedStatusRes.payload.operation).toBeNull();
+  });
+
+  it("requests mid-stream cancellation when stopping an active rip", async () => {
+    prepareRipRuntimeMock.mockResolvedValue(undefined);
+    detectAvailableDiscsMock.mockResolvedValue([{ title: "Movie", driveNumber: 0 }]);
+
+    let resolveRip;
+    startRippingMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRip = resolve;
+        })
+    );
+
+    const startRes = createResponse();
+    await startRipHandler({}, startRes);
+
+    await vi.runAllTicks();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const stopRes = createResponse();
+    await stopHandler({}, stopRes);
+
+    expect(stopRes.statusCode).toBe(200);
+    expect(requestCancelMock).toHaveBeenCalledTimes(1);
+
+    const stoppingStatusRes = createResponse();
+    await statusHandler({}, stoppingStatusRes);
+
+    expect(stoppingStatusRes.payload.operation).toBe(
+      "Cancelling current operation..."
+    );
+    expect(stoppingStatusRes.payload.canStop).toBe(true);
+
+    resolveRip();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await vi.waitFor(async () => {
+      const finalStatusRes = createResponse();
+      await statusHandler({}, finalStatusRes);
+
+      expect(finalStatusRes.payload.status).toBe("idle");
+      expect(finalStatusRes.payload.canStop).toBe(false);
+    });
+  });
+
+  it("uses DriveService directly for load operations", async () => {
+    loadDrivesWithWaitMock.mockResolvedValue(undefined);
+
+    const res = createResponse();
+    await loadHandler({}, res);
+
+    expect(loadDrivesWithWaitMock).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toEqual({
+      success: true,
+      message: "Drives loaded successfully",
+    });
+  });
+
+  it("uses DriveService directly for eject operations", async () => {
+    ejectAllDrivesMock.mockResolvedValue(undefined);
+
+    const res = createResponse();
+    await ejectHandler({}, res);
+
+    expect(ejectAllDrivesMock).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toEqual({
+      success: true,
+      message: "Drives ejected successfully",
+    });
   });
 });

@@ -44,6 +44,7 @@ describe("Complete Ripping Workflow Integration", () => {
     vi.spyOn(DriveService, "loadDrivesWithWait").mockResolvedValue();
     vi.spyOn(DriveService, "loadAllDrives").mockResolvedValue();
     vi.spyOn(DriveService, "ejectAllDrives").mockResolvedValue();
+    vi.spyOn(DriveService, "ejectDriveByNumber").mockResolvedValue(true);
     vi.spyOn(DriveService, "wait").mockResolvedValue();
   });
 
@@ -123,6 +124,9 @@ Additional MakeMKV output here`;
         expect.any(Function)
       );
 
+      expect(DriveService.ejectDriveByNumber).toHaveBeenCalledWith("0");
+      expect(DriveService.ejectDriveByNumber).toHaveBeenCalledWith("1");
+
       // Verify the workflow completed successfully without throwing
       // The test passes if no exceptions are thrown during execution
     });
@@ -168,6 +172,7 @@ Additional MakeMKV output here`;
         expect.stringContaining("mkv disc:0"),
         expect.any(Function)
       );
+      expect(DriveService.ejectDriveByNumber).toHaveBeenCalledWith("0");
     });
   });
 
@@ -460,6 +465,7 @@ DRV:2,2,999,1,"BD-ROM","Movie 3","/dev/sr2"`;
         "./test-media"
       );
       vi.spyOn(AppConfig, "rippingMode", "get").mockReturnValue("async");
+      vi.spyOn(AppConfig, "isRipAllEnabled", "get").mockReturnValue(false);
 
       const mockDriveData = `DRV:0,2,999,1,"BD-ROM","Complex Movie","/dev/sr0"`;
 

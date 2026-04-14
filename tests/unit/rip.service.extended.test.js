@@ -53,6 +53,7 @@ vi.mock("../../src/services/drive.service.js", () => ({
   DriveService: {
     loadDrivesWithWait: vi.fn(),
     ejectAllDrives: vi.fn(),
+    ejectDriveByNumber: vi.fn(),
   },
 }));
 
@@ -97,6 +98,8 @@ describe("RipService - Extended Coverage", () => {
     ValidationUtils.isCopyComplete.mockReturnValue(true);
     fs.existsSync = vi.fn().mockReturnValue(true);
     FileSystemUtils.readdir.mockResolvedValue(["movie.mkv"]);
+    DriveService.ejectDriveByNumber.mockResolvedValue(true);
+    AppConfig.getMakeMKVExecutable.mockResolvedValue("/usr/bin/makemkvcon");
   });
 
   afterEach(() => {
@@ -183,17 +186,91 @@ describe("RipService - Extended Coverage", () => {
     });
   });
 
+  describe("pipeline overlap", () => {
+    it("should start HandBrake work while another rip is still in progress", async () => {
+      AppConfig.isHandBrakeEnabled = true;
+      AppConfig.rippingMode = "async";
+
+      const mockDiscs = [
+        { title: "Movie1", driveNumber: 0, fileNumber: 0 },
+        { title: "Movie2", driveNumber: 1, fileNumber: 0 },
+      ];
+
+      HandBrakeService.convertFile.mockResolvedValue(true);
+
+      let releaseSecondRip;
+      vi.spyOn(ripService, "ripSingleDisc")
+        .mockImplementationOnce(async () => {
+          ripService.pendingHandBrakeJobs.push({
+            file: "movie1.mkv",
+            fullPath: "/test/output/Movie1/movie1.mkv",
+          });
+          ripService.startHandBrakeWorker();
+          return "Movie1";
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseSecondRip = () => resolve("Movie2");
+            })
+        );
+
+      const processingPromise = ripService.processRippingQueue(mockDiscs);
+
+      await vi.waitFor(() => {
+        expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
+          "/test/output/Movie1/movie1.mkv",
+          expect.objectContaining({ signal: expect.any(Object) })
+        );
+      });
+
+      expect(ripService.ripSingleDisc).toHaveBeenCalledTimes(2);
+
+      releaseSecondRip();
+      await processingPromise;
+    });
+
+    it("should cancel active MakeMKV jobs mid-stream", async () => {
+      const fakeChildProcess = {
+        kill: vi.fn(),
+        once: vi.fn(),
+      };
+
+      let execCallback;
+      exec.mockImplementation((command, callback) => {
+        execCallback = callback;
+        return fakeChildProcess;
+      });
+
+      const ripPromise = ripService.ripSingleDisc(
+        { title: "Movie1", driveNumber: 0, fileNumber: 0 },
+        "/test/output"
+      );
+
+      await Promise.resolve();
+
+      ripService.requestCancel();
+      execCallback(new Error("Process terminated"), "", "");
+
+      await expect(ripPromise).rejects.toMatchObject({
+        name: "OperationCancelledError",
+        isCancelled: true,
+      });
+      expect(fakeChildProcess.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(ripService.wasCancelled()).toBe(true);
+    });
+  });
+
   describe("handleRipCompletion - HandBrake integration", () => {
     beforeEach(() => {
       AppConfig.isHandBrakeEnabled = true;
       AppConfig.isFileLogEnabled = false;
     });
 
-    it("should process MKV files with HandBrake when enabled and rip successful", async () => {
+    it("should start background HandBrake processing when enabled and rip successful", async () => {
       const mockStdout = 'MSG:5014,0,0,0,0,"Saving 1 titles into directory file:///test/output/Movie"\nMSG:5036,0,1,"Copy complete."';
       const mockDisc = { title: "TestMovie" };
 
-      HandBrakeService.convertFile.mockResolvedValue(true);
       FileSystemUtils.readdir.mockResolvedValue(["movie.mkv", "info.txt"]);
 
       await ripService.handleRipCompletion(mockStdout, mockDisc);
@@ -201,10 +278,12 @@ describe("RipService - Extended Coverage", () => {
       expect(Logger.info).toHaveBeenCalledWith(
         expect.stringContaining("HandBrake post-processing workflow")
       );
-      expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
-        expect.stringContaining("movie.mkv")
-      );
-      expect(ripService.goodHandBrakeArray).toContain("movie.mkv");
+      await vi.waitFor(() => {
+        expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
+          expect.stringContaining("movie.mkv"),
+          expect.objectContaining({ signal: expect.any(Object) })
+        );
+      });
     });
 
     it("should warn when no MKV files are present", async () => {
@@ -229,45 +308,12 @@ describe("RipService - Extended Coverage", () => {
 
       await ripService.handleRipCompletion(mockStdout, mockDisc);
 
-      expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
-        expect.stringContaining(`Narnia Volume 3${path.sep}movie.mkv`)
-      );
-    });
-
-    it("should track failed HandBrake conversions", async () => {
-      const mockStdout = 'MSG:5014,0,0,0,0,"Saving 1 titles into directory file:///test/output/Movie"\nMSG:5036,0,1,"Copy complete."';
-      const mockDisc = { title: "TestMovie" };
-
-      HandBrakeService.convertFile.mockResolvedValue(false);
-      FileSystemUtils.readdir.mockResolvedValue(["movie.mkv"]);
-
-      await ripService.handleRipCompletion(mockStdout, mockDisc);
-
-      expect(ripService.badHandBrakeArray).toContain("movie.mkv");
-      expect(Logger.error).toHaveBeenCalledWith(
-        expect.stringContaining("HandBrake processing failed")
-      );
-    });
-
-    it("should handle HandBrake errors gracefully", async () => {
-      const mockStdout = 'MSG:5014,0,0,0,0,"Saving 1 titles into directory file:///test/output/Movie"\nMSG:5036,0,1,"Copy complete."';
-      const mockDisc = { title: "TestMovie" };
-
-      const hbError = new Error("HandBrake crashed");
-      hbError.details = "Out of memory";
-      HandBrakeService.convertFile.mockRejectedValue(hbError);
-      FileSystemUtils.readdir.mockResolvedValue(["movie.mkv"]);
-
-      await ripService.handleRipCompletion(mockStdout, mockDisc);
-
-      expect(Logger.error).toHaveBeenCalledWith(
-        "HandBrake post-processing error:",
-        "HandBrake crashed"
-      );
-      expect(Logger.error).toHaveBeenCalledWith(
-        "Error details:",
-        "Out of memory"
-      );
+      await vi.waitFor(() => {
+        expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
+          expect.stringContaining(`Narnia Volume 3${path.sep}movie.mkv`),
+          expect.objectContaining({ signal: expect.any(Object) })
+        );
+      });
     });
 
     it("should skip HandBrake when rip failed", async () => {
@@ -319,6 +365,95 @@ describe("RipService - Extended Coverage", () => {
         "HandBrake post-processing error:",
         expect.stringContaining("does not exist")
       );
+    });
+  });
+
+  describe("processHandBrakeQueue", () => {
+    beforeEach(() => {
+      AppConfig.isHandBrakeEnabled = true;
+      ripService.pendingHandBrakeJobs = [
+        { file: "movie.mkv", fullPath: "/test/output/Movie/movie.mkv" },
+      ];
+    });
+
+    it("should process queued MKV files with HandBrake", async () => {
+      HandBrakeService.convertFile.mockResolvedValue(true);
+
+      await ripService.processHandBrakeQueue();
+
+      expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
+        "/test/output/Movie/movie.mkv",
+        expect.objectContaining({ signal: expect.any(Object) })
+      );
+      expect(ripService.goodHandBrakeArray).toContain("movie.mkv");
+      expect(ripService.pendingHandBrakeJobs).toHaveLength(0);
+    });
+
+    it("should start the background worker when jobs are queued", async () => {
+      HandBrakeService.convertFile.mockResolvedValue(true);
+
+      ripService.startHandBrakeWorker();
+      await ripService.processHandBrakeQueue();
+
+      expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
+        "/test/output/Movie/movie.mkv",
+        expect.objectContaining({ signal: expect.any(Object) })
+      );
+    });
+
+    it("should track failed HandBrake conversions", async () => {
+      HandBrakeService.convertFile.mockResolvedValue(false);
+
+      await ripService.processHandBrakeQueue();
+
+      expect(ripService.badHandBrakeArray).toContain("movie.mkv");
+      expect(Logger.error).toHaveBeenCalledWith(
+        expect.stringContaining("HandBrake processing failed")
+      );
+    });
+
+    it("should handle HandBrake errors gracefully", async () => {
+      const hbError = new Error("HandBrake crashed");
+      hbError.details = "Out of memory";
+      HandBrakeService.convertFile.mockRejectedValue(hbError);
+
+      await ripService.processHandBrakeQueue();
+
+      expect(ripService.badHandBrakeArray).toContain("movie.mkv");
+      expect(Logger.error).toHaveBeenCalledWith(
+        "HandBrake post-processing error:",
+        "HandBrake crashed"
+      );
+      expect(Logger.error).toHaveBeenCalledWith(
+        "Error details:",
+        "Out of memory"
+      );
+    });
+
+    it("should skip processing when no jobs are queued", async () => {
+      ripService.pendingHandBrakeJobs = [];
+
+      await ripService.processHandBrakeQueue();
+
+      expect(HandBrakeService.convertFile).not.toHaveBeenCalled();
+      expect(Logger.info).toHaveBeenCalledWith(
+        "No HandBrake jobs queued for processing."
+      );
+    });
+
+    it("should stop HandBrake processing when cancellation is requested", async () => {
+      const cancelError = new Error("Cancelled");
+      cancelError.name = "AbortError";
+      cancelError.code = "ABORT_ERR";
+      HandBrakeService.convertFile.mockRejectedValue(cancelError);
+
+      ripService.requestCancel();
+
+      await expect(ripService.processHandBrakeQueue()).rejects.toMatchObject({
+        name: "OperationCancelledError",
+        isCancelled: true,
+      });
+      expect(ripService.badHandBrakeArray).toHaveLength(0);
     });
   });
 

@@ -43,6 +43,7 @@ vi.mock("../../src/services/drive.service.js", () => ({
   DriveService: {
     loadDrivesWithWait: vi.fn(() => Promise.resolve()),
     ejectAllDrives: vi.fn(() => Promise.resolve()),
+    ejectDriveByNumber: vi.fn(() => Promise.resolve(true)),
   },
 }));
 
@@ -63,6 +64,12 @@ vi.mock("../../src/utils/filesystem.js", () => ({
 vi.mock("../../src/utils/validation.js", () => ({
   ValidationUtils: {
     isCopyComplete: vi.fn(() => true),
+  },
+}));
+
+vi.mock("../../src/services/handbrake.service.js", () => ({
+  HandBrakeService: {
+    convertFile: vi.fn(() => Promise.resolve(true)),
   },
 }));
 

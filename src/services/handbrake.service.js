@@ -33,6 +33,22 @@ export class HandBrakeError extends Error {
  * Service for handling HandBrake post-processing operations
  */
 export class HandBrakeService {
+  static createCancellationError(message = "HandBrake conversion cancelled") {
+    const error = new Error(message);
+    error.name = "AbortError";
+    error.code = "ABORT_ERR";
+    return error;
+  }
+
+  static isCancellationError(error, signal = null) {
+    return Boolean(
+      signal?.aborted ||
+      error?.isCancelled === true ||
+      error?.name === "AbortError" ||
+      error?.code === "ABORT_ERR"
+    );
+  }
+
   static parseAdditionalArgs(additionalArgsRaw = "") {
     const raw = String(additionalArgsRaw).trim();
     if (!raw) {
@@ -172,14 +188,19 @@ export class HandBrakeService {
    * @returns {Promise<boolean>} Success status
    * @private
    */
-  static async retryConversion(inputPath, outputPath, handBrakePath, retryCount = 0) {
+  static async retryConversion(inputPath, outputPath, handBrakePath, retryCount = 0, options = {}) {
     const { MAX_ATTEMPTS, FALLBACK_PRESETS } = HANDBRAKE_CONSTANTS.RETRY;
+    const signal = options.signal || null;
 
     const inputSizeBytes = fs.statSync(inputPath).size;
     const timeoutMs = this.calculateTimeoutMs(inputSizeBytes);
 
     for (let attempt = retryCount; attempt < MAX_ATTEMPTS; attempt++) {
       try {
+        if (signal?.aborted) {
+          throw this.createCancellationError();
+        }
+
         const fallbackPreset = FALLBACK_PRESETS[attempt] || FALLBACK_PRESETS[0];
         Logger.info(`Retry attempt ${attempt + 1} with preset: ${fallbackPreset}`);
 
@@ -192,7 +213,8 @@ export class HandBrakeService {
 
         const { stdout, stderr } = await execFileAsync(executable, args, {
           timeout: timeoutMs,
-          maxBuffer: 1024 * 1024 * 10
+          maxBuffer: 1024 * 1024 * 10,
+          signal,
         });
 
         this.parseHandBrakeOutput(stdout, stderr);
@@ -201,6 +223,10 @@ export class HandBrakeService {
         Logger.info(`Retry successful with preset: ${fallbackPreset}`);
         return true;
       } catch (error) {
+        if (this.isCancellationError(error, signal)) {
+          throw error;
+        }
+
         Logger.warning(`Retry ${attempt + 1} failed: ${error.message}`);
       }
     }
@@ -548,14 +574,19 @@ export class HandBrakeService {
    * @param {string} inputPath - Path to input MKV file
    * @returns {Promise<boolean>} True if conversion was successful
    */
-  static async convertFile(inputPath) {
+  static async convertFile(inputPath, options = {}) {
     let outputPath; // Declare here to be accessible in catch block
     let handBrakePath;
     let command; // Declare here to be accessible in catch block
+    const signal = options.signal || null;
     try {
       if (!AppConfig.handbrake?.enabled) {
         Logger.info("HandBrake post-processing is disabled, skipping...");
         return true;
+      }
+
+      if (signal?.aborted) {
+        throw this.createCancellationError();
       }
 
       Logger.info("Beginning HandBrake post-processing...");
@@ -609,7 +640,8 @@ export class HandBrakeService {
 
       const { stdout, stderr } = await execFileAsync(executable, args, {
         timeout: timeoutMs,
-        maxBuffer: 1024 * 1024 * 10 // 10MB buffer for long outputs
+        maxBuffer: 1024 * 1024 * 10, // 10MB buffer for long outputs
+        signal,
       });
 
       // Parse HandBrake output for progress and warnings
@@ -642,13 +674,24 @@ export class HandBrakeService {
 
       return true;
     } catch (error) {
+      if (this.isCancellationError(error, signal)) {
+        Logger.warning(`HandBrake conversion cancelled: ${path.basename(inputPath)}`);
+        throw error;
+      }
+
       // Attempt retry with fallback presets
       Logger.warning(`Initial conversion failed: ${error.message}`);
       if (handBrakePath && outputPath) {
         Logger.debug("Attempting retry with fallback preset...");
 
         try {
-          const retrySuccess = await this.retryConversion(inputPath, outputPath, handBrakePath, 0);
+          const retrySuccess = await this.retryConversion(
+            inputPath,
+            outputPath,
+            handBrakePath,
+            0,
+            { signal }
+          );
 
           if (retrySuccess) {
             // Successful retry - check if we should delete original

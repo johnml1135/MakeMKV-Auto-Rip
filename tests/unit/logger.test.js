@@ -182,6 +182,28 @@ describe("Logger and Colors", () => {
     });
   });
 
+  describe("Logger sinks", () => {
+    it("should notify registered sinks and allow unsubscribe", () => {
+      const sink = vi.fn();
+      const detach = Logger.addSink(sink);
+
+      Logger.info("Sink message", "Title");
+
+      expect(sink).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: "info",
+          message: "Sink message",
+          title: "Title",
+        })
+      );
+
+      detach();
+      Logger.warning("After unsubscribe");
+
+      expect(sink).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("Logger.error", () => {
     it("should log error message without details", () => {
       const message = "Test error message";

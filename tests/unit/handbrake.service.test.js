@@ -295,5 +295,25 @@ describe("HandBrakeService", () => {
       expect(retrySpy).not.toHaveBeenCalled();
     });
 
+    it("should abort conversion without retry when the signal is already cancelled", async () => {
+      const retrySpy = vi.spyOn(HandBrakeService, "retryConversion");
+
+      const controller = new AbortController();
+      controller.abort();
+
+      const conversionPromise = HandBrakeService.convertFile("/test/input.mkv", {
+        signal: controller.signal,
+      });
+
+      await expect(conversionPromise).rejects.toMatchObject({
+        name: "AbortError",
+        code: "ABORT_ERR",
+      });
+      expect(retrySpy).not.toHaveBeenCalled();
+      expect(Logger.warning).toHaveBeenCalledWith(
+        "HandBrake conversion cancelled: input.mkv"
+      );
+    });
+
   });
 });

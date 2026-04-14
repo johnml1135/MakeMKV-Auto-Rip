@@ -26,6 +26,30 @@ export const colors = {
  */
 export class Logger {
   static #verbose = false;
+  static #sinks = new Set();
+
+  static addSink(sink) {
+    if (typeof sink !== "function") {
+      return () => {};
+    }
+
+    Logger.#sinks.add(sink);
+    return () => Logger.removeSink(sink);
+  }
+
+  static removeSink(sink) {
+    Logger.#sinks.delete(sink);
+  }
+
+  static #emit(level, payload) {
+    for (const sink of Logger.#sinks) {
+      try {
+        sink({ level, ...payload });
+      } catch {
+        // Sink failures must never break application logging.
+      }
+    }
+  }
 
   /**
    * Enable or disable verbose/debug logging
@@ -55,6 +79,8 @@ export class Logger {
     } else {
       console.info(`${timestamp}${dash}${infoText}`);
     }
+
+    Logger.#emit("info", { message, title });
   }
 
   /**
@@ -77,6 +103,8 @@ export class Logger {
     } else {
       console.info(`${timestamp}${dash}${debugText}`);
     }
+
+    Logger.#emit("debug", { message, title });
   }
 
   static error(message, details = null) {
@@ -90,14 +118,18 @@ export class Logger {
     if (details) {
       console.error(colors.blue(details));
     }
+
+    Logger.#emit("error", { message, details });
   }
 
   static warning(message) {
     console.info(colors.warning(message));
+    Logger.#emit("warn", { message });
   }
 
   static plain(message) {
     console.info(message);
+    Logger.#emit("info", { message });
   }
 
   static separator() {
@@ -106,13 +138,16 @@ export class Logger {
 
   static header(message) {
     console.info(colors.line1(message));
+    Logger.#emit("info", { message });
   }
 
   static headerAlt(message) {
     console.info(colors.line2(message));
+    Logger.#emit("info", { message });
   }
 
   static underline(message) {
     console.info(colors.white.underline(message));
+    Logger.#emit("info", { message });
   }
 }

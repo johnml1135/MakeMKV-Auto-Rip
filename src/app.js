@@ -9,6 +9,14 @@ import { Logger } from "./utils/logger.js";
 import { safeExit, isProcessExitError } from "./utils/process.js";
 import { HandBrakeService } from "./services/handbrake.service.js";
 
+export async function prepareRipRuntime() {
+  await AppConfig.validate();
+
+  if (AppConfig.handbrake?.enabled) {
+    await HandBrakeService.validate();
+  }
+}
+
 /**
  * Main application function
  * @param {Object} flags - Command line flags
@@ -17,21 +25,13 @@ import { HandBrakeService } from "./services/handbrake.service.js";
  */
 export async function main(flags = {}) {
   try {
-    // Validate configuration before starting
-    await AppConfig.validate();
-
-    // Validate HandBrake if enabled
     try {
-      if (AppConfig.handbrake?.enabled) {
-        await HandBrakeService.validate();
-      }
+      await prepareRipRuntime();
     } catch (error) {
       Logger.error("HandBrake validation failed:", error.message);
       if (error.details) {
         Logger.error("Details:", error.details);
       }
-      // We throw here because if HandBrake is enabled but not working,
-      // we want to fail early rather than process a disc only to fail at the conversion stage
       throw error;
     }
 

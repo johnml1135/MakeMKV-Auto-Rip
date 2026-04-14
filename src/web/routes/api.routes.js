@@ -6,10 +6,12 @@
 import { Router } from "express";
 import fs from "fs/promises";
 import path from "path";
-import { spawn } from "child_process";
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 import { AppConfig } from "../../config/index.js";
+import { prepareRipRuntime } from "../../app.js";
 import { DiscService } from "../../services/disc.service.js";
+import { DriveService } from "../../services/drive.service.js";
+import { RipService } from "../../services/rip.service.js";
 import { Logger } from "../../utils/logger.js";
 import {
   broadcastStatusUpdate,
@@ -21,12 +23,15 @@ const router = Router();
 // Status tracking
 let currentOperation = null;
 let operationStatus = "idle"; // idle, loading, ejecting, ripping
-let currentProcess = null; // Store reference to current running process
+let currentOperationPromise = null;
+let currentStopRequested = false;
+let activeWebLoggerSinkCleanup = null;
+let currentRipService = null;
 let ripModeEnabled = false;
 let ripModeLoop = null;
 
 function getCanStop() {
-  return currentProcess !== null || (operationStatus === "ripping" && ripModeEnabled);
+  return currentOperationPromise !== null || (operationStatus === "ripping" && ripModeEnabled);
 }
 
 function broadcastCurrentStatus() {
@@ -44,8 +49,87 @@ function setOperationState(status, operation = null) {
 function resetOperationState() {
   operationStatus = "idle";
   currentOperation = null;
-  currentProcess = null;
+  currentOperationPromise = null;
+  currentStopRequested = false;
   broadcastCurrentStatus();
+}
+
+function formatLogMessage(message, title = null) {
+  return [message, title]
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .map((value) => String(value))
+    .join(" ")
+    .trim();
+}
+
+function attachWebLoggerSink() {
+  if (activeWebLoggerSinkCleanup) {
+    return activeWebLoggerSinkCleanup;
+  }
+
+  activeWebLoggerSinkCleanup = Logger.addSink(
+    ({ level, message, title, details }) => {
+      if (level === "debug") {
+        return;
+      }
+
+      const formattedMessage = formatLogMessage(message, title);
+      if (formattedMessage) {
+        broadcastLogMessage(level, formattedMessage);
+      }
+
+      if (details !== null && details !== undefined && details !== "") {
+        broadcastLogMessage(level, String(details));
+      }
+    }
+  );
+
+  return activeWebLoggerSinkCleanup;
+}
+
+function detachWebLoggerSink() {
+  if (activeWebLoggerSinkCleanup) {
+    activeWebLoggerSinkCleanup();
+    activeWebLoggerSinkCleanup = null;
+  }
+}
+
+async function runTrackedOperation(operation) {
+  currentOperationPromise = Promise.resolve().then(operation);
+  broadcastCurrentStatus();
+
+  try {
+    return await currentOperationPromise;
+  } finally {
+    currentOperationPromise = null;
+    currentStopRequested = false;
+    broadcastCurrentStatus();
+  }
+}
+
+async function executeRipCycle() {
+  const ripService = new RipService({ exitOnCriticalError: false });
+  currentRipService = ripService;
+
+  try {
+    await prepareRipRuntime();
+    await runTrackedOperation(() => ripService.startRipping());
+
+    if (ripService.wasCancelled()) {
+      return { success: false, cancelled: true };
+    }
+
+    return { success: true };
+  } catch (error) {
+    if (ripService.isCancellationRequested() || ripService.isCancellationError(error)) {
+      return { success: false, cancelled: true };
+    }
+
+    Logger.error("Rip cycle failed", error.message);
+    return { success: false, error: error.message };
+  } finally {
+    currentRipService = null;
+  }
 }
 
 function wait(ms) {
@@ -61,10 +145,6 @@ async function detectDiscsForRipMode() {
     return await DiscService.detectAvailableDiscs();
   } catch (error) {
     Logger.error("Rip mode disc detection failed", error.message);
-    broadcastLogMessage(
-      "error",
-      `Rip mode disc detection failed: ${error.message}`
-    );
     return [];
   }
 }
@@ -105,14 +185,7 @@ async function runRipModeLoop() {
       `Detected ${detectedDiscs.length} disc(s). Starting rip process...`
     );
 
-    const result = await executeCliCommand("npm", [
-      "run",
-      "start",
-      "--silent",
-      "--",
-      "--no-confirm",
-      "--quiet",
-    ]);
+    const result = await executeRipCycle();
 
     if (!ripModeEnabled) {
       break;
@@ -140,6 +213,8 @@ function ensureRipModeLoop() {
   }
 
   ripModeLoop = (async () => {
+    attachWebLoggerSink();
+
     try {
       await runRipModeLoop();
     } catch (error) {
@@ -147,6 +222,7 @@ function ensureRipModeLoop() {
       broadcastLogMessage("error", `Rip mode failed: ${error.message}`);
     } finally {
       ripModeLoop = null;
+      detachWebLoggerSink();
 
       if (!ripModeEnabled) {
         resetOperationState();
@@ -159,75 +235,17 @@ function ensureRipModeLoop() {
 
 function stopCurrentOperation(message) {
   ripModeEnabled = false;
+  currentStopRequested = true;
 
-  const processToKill = currentProcess;
-  if (processToKill) {
-    processToKill.kill("SIGTERM");
-
-    setTimeout(() => {
-      if (currentProcess === processToKill && !processToKill.killed) {
-        processToKill.kill("SIGKILL");
-      }
-    }, 3000);
+  if (currentOperationPromise) {
+    currentRipService?.requestCancel();
+    setOperationState(operationStatus, "Cancelling current operation...");
   } else {
+    detachWebLoggerSink();
     resetOperationState();
   }
 
   broadcastLogMessage("warn", message);
-}
-
-/**
- * Execute a CLI command and capture its output
- * @param {string} command - Command to execute
- * @param {Array} args - Command arguments
- * @returns {Promise<{success: boolean, output: string, error?: string}>}
- */
-function executeCliCommand(command, args = []) {
-  return new Promise((resolve) => {
-    const childProcess = spawn(command, args, {
-      cwd: path.resolve(process.cwd()),
-      shell: true,
-    });
-
-    // Store reference to current process for potential termination
-    currentProcess = childProcess;
-  broadcastCurrentStatus();
-
-    let output = "";
-    let error = "";
-
-    childProcess.stdout.on("data", (data) => {
-      const text = data.toString();
-      output += text;
-      // Broadcast real program output to WebSocket clients
-      broadcastLogMessage("info", text.trim());
-    });
-
-    childProcess.stderr.on("data", (data) => {
-      const text = data.toString();
-      error += text;
-      // Broadcast errors to WebSocket clients
-      broadcastLogMessage("error", text.trim());
-    });
-
-    childProcess.on("close", (code) => {
-      currentProcess = null; // Clear the process reference
-      resolve({
-        success: code === 0,
-        output: output.trim(),
-        error: error.trim(),
-      });
-    });
-
-    childProcess.on("error", (err) => {
-      currentProcess = null; // Clear the process reference
-      resolve({
-        success: false,
-        output: "",
-        error: err.message,
-      });
-    });
-  });
 }
 
 /**
@@ -282,7 +300,7 @@ router.post("/stop", async (req, res) => {
 });
 
 /**
- * Load all drives using CLI command
+ * Load all drives using the same in-process service path as the CLI
  */
 router.post("/drives/load", async (req, res) => {
   try {
@@ -293,31 +311,27 @@ router.post("/drives/load", async (req, res) => {
     }
 
     setOperationState("loading", "Loading drives...");
+    attachWebLoggerSink();
 
-    const result = await executeCliCommand("npm", [
-      "run",
-      "load",
-      "--silent",
-      "--",
-      "--quiet",
-    ]);
+    await AppConfig.validate();
+    await runTrackedOperation(() => DriveService.loadDrivesWithWait());
 
     resetOperationState();
+    detachWebLoggerSink();
 
-    if (result.success) {
+    {
       res.json({ success: true, message: "Drives loaded successfully" });
-    } else {
-      res.status(500).json({ error: "Failed to load drives: " + result.error });
     }
   } catch (error) {
     resetOperationState();
+    detachWebLoggerSink();
     Logger.error("Failed to load drives", error.message);
     res.status(500).json({ error: "Failed to load drives: " + error.message });
   }
 });
 
 /**
- * Eject all drives using CLI command
+ * Eject all drives using the same in-process service path as the CLI
  */
 router.post("/drives/eject", async (req, res) => {
   try {
@@ -328,26 +342,20 @@ router.post("/drives/eject", async (req, res) => {
     }
 
     setOperationState("ejecting", "Ejecting drives...");
+    attachWebLoggerSink();
 
-    const result = await executeCliCommand("npm", [
-      "run",
-      "eject",
-      "--silent",
-      "--",
-      "--quiet",
-    ]);
+    await AppConfig.validate();
+    await runTrackedOperation(() => DriveService.ejectAllDrives());
 
     resetOperationState();
+    detachWebLoggerSink();
 
-    if (result.success) {
+    {
       res.json({ success: true, message: "Drives ejected successfully" });
-    } else {
-      res
-        .status(500)
-        .json({ error: "Failed to eject drives: " + result.error });
     }
   } catch (error) {
     resetOperationState();
+    detachWebLoggerSink();
     Logger.error("Failed to eject drives", error.message);
     res.status(500).json({ error: "Failed to eject drives: " + error.message });
   }

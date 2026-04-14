@@ -15,11 +15,105 @@ import { MakeMKVMessages } from "../utils/makemkv-messages.js";
  * Service for handling DVD/Blu-ray ripping operations
  */
 export class RipService {
-  constructor() {
+  constructor(options = {}) {
     this.goodVideoArray = [];
     this.badVideoArray = [];
     this.goodHandBrakeArray = [];
     this.badHandBrakeArray = [];
+    this.pendingHandBrakeJobs = [];
+    this.handbrakeWorkerPromise = null;
+    this.handbrakeWorkerError = null;
+    this.exitOnCriticalError = options.exitOnCriticalError !== false;
+    this.cancelRequested = false;
+    this.runCancelled = false;
+    this.activeRipProcesses = new Set();
+    this.abortController = new AbortController();
+  }
+
+  prepareForRun() {
+    this.cancelRequested = false;
+    this.runCancelled = false;
+    this.pendingHandBrakeJobs = [];
+    this.handbrakeWorkerPromise = null;
+    this.handbrakeWorkerError = null;
+    this.activeRipProcesses = new Set();
+
+    if (this.abortController.signal.aborted) {
+      this.abortController = new AbortController();
+    }
+  }
+
+  createCancellationError(message = "Operation cancelled") {
+    const error = new Error(message);
+    error.name = "OperationCancelledError";
+    error.isCancelled = true;
+    return error;
+  }
+
+  isCancellationError(error) {
+    return Boolean(
+      error?.isCancelled === true ||
+      (this.cancelRequested &&
+        (error?.name === "AbortError" ||
+          error?.code === "ABORT_ERR" ||
+          error?.signal === "SIGTERM" ||
+          error?.killed === true))
+    );
+  }
+
+  throwIfCancelled(message = "Operation cancelled") {
+    if (this.cancelRequested) {
+      throw this.createCancellationError(message);
+    }
+  }
+
+  isCancellationRequested() {
+    return this.cancelRequested;
+  }
+
+  wasCancelled() {
+    return this.runCancelled;
+  }
+
+  requestCancel() {
+    if (this.cancelRequested) {
+      return false;
+    }
+
+    this.cancelRequested = true;
+    this.runCancelled = true;
+    this.pendingHandBrakeJobs = [];
+
+    if (!this.abortController.signal.aborted) {
+      this.abortController.abort(this.createCancellationError());
+    }
+
+    for (const childProcess of this.activeRipProcesses) {
+      try {
+        childProcess.kill("SIGTERM");
+      } catch {
+        // Best-effort cancellation for child processes.
+      }
+    }
+
+    return true;
+  }
+
+  registerRipProcess(childProcess) {
+    if (!childProcess || typeof childProcess.kill !== "function") {
+      return () => {};
+    }
+
+    this.activeRipProcesses.add(childProcess);
+
+    const cleanup = () => {
+      this.activeRipProcesses.delete(childProcess);
+    };
+
+    childProcess.once?.("close", cleanup);
+    childProcess.once?.("error", cleanup);
+
+    return cleanup;
   }
 
   extractOutputFolder(stdout) {
@@ -62,6 +156,8 @@ export class RipService {
    * @returns {Promise<void>}
    */
   async startRipping() {
+    this.prepareForRun();
+
     try {
       // Load drives first if loading is enabled
       if (AppConfig.isLoadDrivesEnabled) {
@@ -73,6 +169,7 @@ export class RipService {
       const fakeDate = AppConfig.makeMKVFakeDate;
 
       await withSystemDate(fakeDate, async () => {
+        this.throwIfCancelled("Ripping cancelled");
         Logger.info("Beginning AutoRip... Please Wait.");
         const commandDataItems = await DiscService.getAvailableDiscs();
 
@@ -90,13 +187,33 @@ export class RipService {
           `Found ${commandDataItems.length} disc(s) ready for ripping.`
         );
         await this.processRippingQueue(commandDataItems);
-        this.displayResults();
+        this.throwIfCancelled("Ripping cancelled");
         await this.handlePostRipActions();
+        this.throwIfCancelled("Ripping cancelled");
+        await this.processHandBrakeQueue();
+        this.throwIfCancelled("Ripping cancelled");
+        this.displayResults();
       });
     } catch (error) {
+      if (this.isCancellationError(error)) {
+        this.runCancelled = true;
+        Logger.warning("Ripping operation cancelled.");
+
+        if (this.exitOnCriticalError) {
+          return;
+        }
+
+        throw error;
+      }
+
       Logger.error("Critical error during ripping process", error);
       await this.ejectDiscs();
-      safeExit(1, "Critical error during ripping process");
+      if (this.exitOnCriticalError) {
+        safeExit(1, "Critical error during ripping process");
+        return;
+      }
+
+      throw error;
     }
   }
 
@@ -110,9 +227,15 @@ export class RipService {
       // Process discs one at a time (synchronously)
       Logger.info("Ripping discs synchronously (one at a time)...");
       for (const item of commandDataItems) {
+        this.throwIfCancelled("Ripping cancelled");
+
         try {
           await this.ripSingleDisc(item, AppConfig.movieRipsDir);
         } catch (error) {
+          if (this.isCancellationError(error)) {
+            throw error;
+          }
+
           Logger.error(`Error ripping ${item.title}`, error);
           this.badVideoArray.push(item.title);
         }
@@ -126,6 +249,10 @@ export class RipService {
         const promise = this.ripSingleDisc(item, AppConfig.movieRipsDir)
           .then((result) => result)
           .catch((error) => {
+            if (this.isCancellationError(error)) {
+              throw error;
+            }
+
             Logger.error(`Error ripping ${item.title}`, error);
             this.badVideoArray.push(item.title);
           });
@@ -149,61 +276,79 @@ export class RipService {
    */
   async ripSingleDisc(commandDataItem, outputPath) {
     return new Promise(async (resolve, reject) => {
-      const dir = FileSystemUtils.createUniqueFolder(
-        outputPath,
-        commandDataItem.title
-      );
+      try {
+        this.throwIfCancelled("Ripping cancelled");
 
-      Logger.info(`Ripping Title ${commandDataItem.title} to ${dir}...`);
-
-      // Get MakeMKV executable path with cross-platform detection
-      const makeMKVExecutable = await AppConfig.getMakeMKVExecutable();
-      if (!makeMKVExecutable) {
-        reject(
-          new Error(
-            "MakeMKV executable not found. Please ensure MakeMKV is installed."
-          )
-        );
-        return;
-      }
-
-      const makeMKVCommand = `${makeMKVExecutable} -r mkv disc:${commandDataItem.driveNumber} ${commandDataItem.fileNumber} "${dir}"`;
-
-      exec(makeMKVCommand, async (err, stdout, stderr) => {
-        // Check for critical MakeMKV messages (not first call, so only check for errors)
-        const shouldContinue = MakeMKVMessages.checkOutput(
-          stdout + (stderr || ""),
-          false
+        const dir = FileSystemUtils.createUniqueFolder(
+          outputPath,
+          commandDataItem.title
         );
 
-        if (!shouldContinue) {
-          Logger.error(
-            "MakeMKV version is too old, please update to the latest version"
-          );
+        Logger.info(`Ripping Title ${commandDataItem.title} to ${dir}...`);
+
+        // Get MakeMKV executable path with cross-platform detection
+        const makeMKVExecutable = await AppConfig.getMakeMKVExecutable();
+        if (!makeMKVExecutable) {
           reject(
             new Error(
-              "MakeMKV version is too old, please update to the latest version"
+              "MakeMKV executable not found. Please ensure MakeMKV is installed."
             )
           );
           return;
         }
 
-        if (err || stderr) {
-          Logger.error(
-            `Critical Error Ripping ${commandDataItem.title}`,
-            err || stderr
-          );
-          reject(err || stderr);
-          return;
-        }
+        const makeMKVCommand = `${makeMKVExecutable} -r mkv disc:${commandDataItem.driveNumber} ${commandDataItem.fileNumber} "${dir}"`;
+        let childProcess;
+        let cleanupProcess = () => {};
 
-        try {
-          await this.handleRipCompletion(stdout, commandDataItem);
-          resolve(commandDataItem.title);
-        } catch (error) {
-          reject(error);
-        }
-      });
+        childProcess = exec(makeMKVCommand, async (err, stdout, stderr) => {
+          cleanupProcess();
+
+          if (this.cancelRequested) {
+            reject(this.createCancellationError("Ripping cancelled"));
+            return;
+          }
+
+          // Check for critical MakeMKV messages (not first call, so only check for errors)
+          const shouldContinue = MakeMKVMessages.checkOutput(
+            stdout + (stderr || ""),
+            false
+          );
+
+          if (!shouldContinue) {
+            Logger.error(
+              "MakeMKV version is too old, please update to the latest version"
+            );
+            reject(
+              new Error(
+                "MakeMKV version is too old, please update to the latest version"
+              )
+            );
+            return;
+          }
+
+          if (err || stderr) {
+            Logger.error(
+              `Critical Error Ripping ${commandDataItem.title}`,
+              err || stderr
+            );
+            reject(err || stderr);
+            return;
+          }
+
+          try {
+            await this.handleRipCompletion(stdout, commandDataItem);
+            await this.ejectCompletedDisc(commandDataItem);
+            resolve(commandDataItem.title);
+          } catch (error) {
+            reject(error);
+          }
+        });
+
+        cleanupProcess = this.registerRipProcess(childProcess);
+      } catch (error) {
+        reject(error);
+      }
     });
   }
 
@@ -247,11 +392,17 @@ export class RipService {
     const success = this.checkCopyCompletion(stdout, commandDataItem);
     Logger.info(`Rip completion check result: ${success ? 'successful' : 'failed'}`);
 
-    // If rip was successful and HandBrake is enabled, process the file
+    if (success && this.cancelRequested) {
+      Logger.info("Cancellation requested, skipping HandBrake queueing for completed rip.");
+      Logger.separator();
+      return;
+    }
+
+    // If rip was successful and HandBrake is enabled, queue the file for the encode phase
     Logger.info(`HandBrake enabled status: ${AppConfig.isHandBrakeEnabled ? 'enabled' : 'disabled'}`);
     if (success && AppConfig.isHandBrakeEnabled) {
       try {
-        Logger.info("Starting HandBrake post-processing workflow...");
+        Logger.info("Queueing HandBrake post-processing workflow for after ripping...");
         const outputFolder = this.extractOutputFolder(stdout);
 
         if (!outputFolder) {
@@ -278,22 +429,13 @@ export class RipService {
           return;
         }
 
-        // Process each MKV file from this rip
         for (const file of mkvFiles) {
-          Logger.info(`Found MKV file: ${file}`);
-
           const fullPath = path.join(outputFolder, file);
-          Logger.info(`Found MKV file for processing: ${file}`);
-          const success = await HandBrakeService.convertFile(fullPath);
-
-          if (success) {
-            this.goodHandBrakeArray.push(file);
-            Logger.info(`HandBrake processing succeeded for: ${file}`);
-          } else {
-            this.badHandBrakeArray.push(file);
-            Logger.error(`HandBrake processing failed for: ${file}`);
-          }
+          this.pendingHandBrakeJobs.push({ file, fullPath });
+          Logger.info(`Queued MKV file for HandBrake processing: ${file}`);
         }
+
+        this.startHandBrakeWorker();
       } catch (error) {
         Logger.error("HandBrake post-processing error:", error.message);
         if (error.details) {
@@ -305,6 +447,124 @@ export class RipService {
     }
 
     Logger.separator();
+  }
+
+  /**
+   * Eject a completed disc so the drive can be reused while HandBrake continues
+   * @param {Object} commandDataItem - Disc information object
+   * @returns {Promise<void>}
+   */
+  async ejectCompletedDisc(commandDataItem) {
+    if (!AppConfig.isEjectDrivesEnabled) {
+      return;
+    }
+
+    const ejected = await DriveService.ejectDriveByNumber(
+      commandDataItem.driveNumber
+    );
+
+    if (!ejected) {
+      Logger.warning(
+        `Unable to automatically eject drive ${commandDataItem.driveNumber} after ripping ${commandDataItem.title}.`
+      );
+    }
+  }
+
+  /**
+   * Start the background HandBrake worker if work is queued and no worker is active
+   */
+  startHandBrakeWorker() {
+    if (
+      this.cancelRequested ||
+      !AppConfig.isHandBrakeEnabled ||
+      this.handbrakeWorkerPromise ||
+      this.pendingHandBrakeJobs.length === 0
+    ) {
+      return;
+    }
+
+    Logger.info(
+      `Starting HandBrake pipeline worker for ${this.pendingHandBrakeJobs.length} queued file(s)...`
+    );
+
+    this.handbrakeWorkerPromise = this.runHandBrakeQueue()
+      .catch((error) => {
+        this.handbrakeWorkerError = error;
+      })
+      .finally(() => {
+        this.handbrakeWorkerPromise = null;
+
+        if (!this.cancelRequested && this.pendingHandBrakeJobs.length > 0) {
+          this.startHandBrakeWorker();
+        }
+      });
+  }
+
+  /**
+   * Run queued HandBrake work sequentially while ripping can continue elsewhere
+   * @returns {Promise<void>}
+   */
+  async runHandBrakeQueue() {
+    while (this.pendingHandBrakeJobs.length > 0) {
+      this.throwIfCancelled("HandBrake processing cancelled");
+      const job = this.pendingHandBrakeJobs.shift();
+
+      try {
+        Logger.info(`Processing queued MKV file with HandBrake: ${job.file}`);
+        const success = await HandBrakeService.convertFile(job.fullPath, {
+          signal: this.abortController.signal,
+        });
+
+        this.throwIfCancelled("HandBrake processing cancelled");
+
+        if (success) {
+          this.goodHandBrakeArray.push(job.file);
+          Logger.info(`HandBrake processing succeeded for: ${job.file}`);
+        } else {
+          this.badHandBrakeArray.push(job.file);
+          Logger.error(`HandBrake processing failed for: ${job.file}`);
+        }
+      } catch (error) {
+        if (this.isCancellationError(error)) {
+          throw error;
+        }
+
+        this.badHandBrakeArray.push(job.file);
+        Logger.error("HandBrake post-processing error:", error.message);
+        if (error.details) {
+          Logger.error("Error details:", error.details);
+        }
+      }
+    }
+  }
+
+  /**
+   * Process queued HandBrake jobs after all ripping has completed
+   * @returns {Promise<void>}
+   */
+  async processHandBrakeQueue() {
+    if (!AppConfig.isHandBrakeEnabled) {
+      return;
+    }
+
+    this.throwIfCancelled("HandBrake processing cancelled");
+
+    if (!this.handbrakeWorkerPromise && this.pendingHandBrakeJobs.length === 0) {
+      Logger.info("No HandBrake jobs queued for processing.");
+      return;
+    }
+
+    this.startHandBrakeWorker();
+
+    while (this.handbrakeWorkerPromise) {
+      await this.handbrakeWorkerPromise;
+    }
+
+    if (this.handbrakeWorkerError) {
+      const error = this.handbrakeWorkerError;
+      this.handbrakeWorkerError = null;
+      throw error;
+    }
   }
 
   /**
@@ -367,6 +627,9 @@ export class RipService {
     this.badVideoArray = [];
     this.goodHandBrakeArray = [];
     this.badHandBrakeArray = [];
+    this.pendingHandBrakeJobs = [];
+    this.handbrakeWorkerPromise = null;
+    this.handbrakeWorkerError = null;
   }
 
   /**
