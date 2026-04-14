@@ -273,6 +273,10 @@ handbrake:
   # Delete original MKV file after successful conversion (true/false)
   delete_original: true
 
+   # Percentage of available logical CPU cores to use for HandBrake encoding
+   # Set to 100 to allow HandBrake to use all available logical CPU cores
+   cpu_percent: 75
+
    # Subtitle handling (HandBrakeCLI)
    subtitles:
       # Enable/disable automatic subtitle selection (true/false)
@@ -298,6 +302,7 @@ handbrake:
    # Examples:
    # - Keep all subtitles (best for text-based subs): "--all-subtitles"
    # - Keep all English subtitles: "--subtitle-lang-list eng --all-subtitles"
+   # - Override CPU thread calculation directly: "--encopts threads=4"
   additional_args: ""
 
 # Interface behavior settings
@@ -362,6 +367,7 @@ makemkv:
     - See [HandBrake documentation](https://handbrake.fr/docs/en/latest/technical/official-presets.html) for more presets
   - **`handbrake.output_format`** - Output container format (`"mp4"` or `"m4v"`)
   - **`handbrake.delete_original`** - Delete original MKV after successful conversion (`true` or `false`)
+   - **`handbrake.cpu_percent`** - Percentage of available logical CPU cores to allocate to HandBrake software encoding (default: `75`; set to `100` for all cores)
    - **`handbrake.subtitles.enabled`** - Enable/disable automatic subtitle selection (`true` or `false`)
    - **`handbrake.subtitles.lang_list`** - Comma-separated ISO 639-2 subtitle language codes (e.g. `"eng,spa"`)
       - Tip: include `"any"` to keep all subtitle languages while still preferring English first (default: `"eng,any"`)
@@ -371,6 +377,7 @@ makemkv:
   - **`handbrake.additional_args`** - Additional HandBrakeCLI arguments for advanced users
       - Subtitles note: MP4/M4V containers generally cannot carry bitmap subtitles (Blu-ray PGS / DVD VobSub) as soft subtitles.
          - This project does not burn subtitles into the video, so keep the original MKV when those tracks matter.
+      - CPU note: if you pass `--encopts threads=...` here, it overrides the automatic `handbrake.cpu_percent` thread calculation.
       - Subtitles examples:
          - Keep all subtitles (best for text-based subs): `--all-subtitles`
          - Keep all English subtitles: `--subtitle-lang-list eng --all-subtitles`

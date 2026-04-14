@@ -169,6 +169,7 @@ export class AppConfig {
         preset: "Fast 1080p30",
         output_format: "mp4",
         delete_original: false,
+        cpu_percent: 75,
         additional_args: "",
         subtitles: {
           enabled: true,
@@ -186,6 +187,7 @@ export class AppConfig {
       preset: config.handbrake.preset || "Fast 1080p30",
       output_format: (config.handbrake.output_format || "mp4").toLowerCase(),
       delete_original: Boolean(config.handbrake.delete_original),
+      cpu_percent: config.handbrake.cpu_percent !== undefined ? config.handbrake.cpu_percent : 75,
       additional_args: config.handbrake.additional_args || "",
       subtitles: {
         enabled: config.handbrake.subtitles?.enabled !== undefined

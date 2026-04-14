@@ -10,6 +10,14 @@ import { Logger } from "../../src/utils/logger.js";
 vi.mock("fs");
 vi.mock("fs/promises");
 vi.mock("child_process");
+vi.mock("os", () => ({
+  availableParallelism: vi.fn(() => 8),
+  cpus: vi.fn(() => Array.from({ length: 8 }, () => ({
+    model: "Mock CPU",
+    speed: 1000,
+    times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 }
+  })))
+}));
 vi.mock("../../src/utils/logger.js");
 vi.mock("../../src/utils/filesystem.js");
 
@@ -22,6 +30,7 @@ vi.mock("../../src/config/index.js", () => ({
       preset: "Fast 1080p30",
       output_format: "mp4",
       delete_original: false,
+      cpu_percent: 75,
       additional_args: "",
       subtitles: {
         enabled: true,
@@ -51,6 +60,7 @@ describe("HandBrakeService", () => {
       preset: "Fast 1080p30",
       output_format: "mp4",
       delete_original: false,
+      cpu_percent: 75,
       additional_args: "",
       subtitles: {
         enabled: true,
@@ -86,6 +96,11 @@ describe("HandBrakeService", () => {
     it("should throw error for conflicting additional args", () => {
       const invalidConfig = { ...mockAppConfig.handbrake, additional_args: "--input test.mkv" };
       expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/conflicting options/);
+    });
+
+    it("should throw error for invalid cpu percent", () => {
+      const invalidConfig = { ...mockAppConfig.handbrake, cpu_percent: 0 };
+      expect(() => HandBrakeService.validateConfig(invalidConfig)).toThrow(/cpu_percent must be a number between 1 and 100/);
     });
 
     it("should throw error for subtitle burn arguments", () => {
@@ -132,9 +147,18 @@ describe("HandBrakeService", () => {
       expect(cmd).toContain('--input /input/test.mkv');
       expect(cmd).toContain('--output /output/test.mp4');
       expect(cmd).toContain('--preset "Fast 1080p30"');
+      expect(cmd).toContain('--encopts threads=6');
       expect(cmd).toContain('--subtitle-lang-list eng,any');
       expect(cmd).toContain('--all-subtitles');
       expect(cmd).toContain('--subtitle-default=1');
+    });
+
+    it("should derive thread count from cpu_percent", () => {
+      mockAppConfig.handbrake.cpu_percent = 50;
+
+      const cmd = HandBrakeService.buildCommand("/bin/hb", "in.mkv", "out.mp4");
+
+      expect(cmd).toContain('--encopts threads=4');
     });
 
     it("should include optimization for MP4 format", () => {
@@ -155,6 +179,23 @@ describe("HandBrakeService", () => {
       const cmd = HandBrakeService.buildCommand("/bin/hb", "in.mkv", "out.mp4");
 
       expect(cmd).toContain('--encoder-preset "x264 (8-bit)"');
+    });
+
+    it("should append the configured thread limit to existing encopts", () => {
+      mockAppConfig.handbrake.additional_args = '--encopts bframes=3';
+
+      const cmd = HandBrakeService.buildCommand("/bin/hb", "in.mkv", "out.mp4");
+
+      expect(cmd).toContain('--encopts bframes=3:threads=6');
+    });
+
+    it("should keep user-specified thread encopts", () => {
+      mockAppConfig.handbrake.additional_args = '--encopts bframes=3:threads=2';
+
+      const cmd = HandBrakeService.buildCommand("/bin/hb", "in.mkv", "out.mp4");
+
+      expect(cmd).toContain('--encopts bframes=3:threads=2');
+      expect(cmd).not.toContain('threads=6');
     });
 
     it("should never add subtitle burn-in flags", () => {

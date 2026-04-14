@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { availableParallelism, cpus } from "os";
 import path from "path";
 import { promisify } from "util";
 import fs from "fs";
@@ -72,6 +73,64 @@ export class HandBrakeService {
     return tokens.some(token =>
       optionNames.some(optionName => token === optionName || token.startsWith(`${optionName}=`))
     );
+  }
+
+  static getAvailableCpuCount() {
+    if (typeof availableParallelism === 'function') {
+      return availableParallelism();
+    }
+
+    const detectedCpus = cpus();
+    return Array.isArray(detectedCpus) && detectedCpus.length > 0 ? detectedCpus.length : 1;
+  }
+
+  static getConfiguredThreadCount(cpuPercent = AppConfig.handbrake.cpu_percent) {
+    const parsedCpuPercent = Number(cpuPercent);
+    const safeCpuPercent = Number.isFinite(parsedCpuPercent)
+      ? Math.min(Math.max(parsedCpuPercent, 1), 100)
+      : 75;
+
+    return Math.max(1, Math.floor(this.getAvailableCpuCount() * (safeCpuPercent / 100)));
+  }
+
+  static mergeConfiguredThreadLimit(additionalArgs, cpuPercent = AppConfig.handbrake.cpu_percent) {
+    const args = [...additionalArgs];
+    const threadCount = this.getConfiguredThreadCount(cpuPercent);
+    const encoptsFlags = ['-x', '--encopts'];
+    const threadPattern = /(?:^|:)threads=[^:]+(?:$|:)/;
+    const appendThreadLimit = (value = '') => {
+      if (threadPattern.test(value)) {
+        return value;
+      }
+
+      return value ? `${value}:threads=${threadCount}` : `threads=${threadCount}`;
+    };
+
+    const inlineEncoptsIndex = args.findIndex(token =>
+      encoptsFlags.some(flag => token.startsWith(`${flag}=`))
+    );
+    if (inlineEncoptsIndex !== -1) {
+      const token = args[inlineEncoptsIndex];
+      const separatorIndex = token.indexOf('=');
+      const option = token.slice(0, separatorIndex);
+      const value = token.slice(separatorIndex + 1);
+      args[inlineEncoptsIndex] = `${option}=${appendThreadLimit(value)}`;
+      return args;
+    }
+
+    const encoptsIndex = args.findIndex(token => encoptsFlags.includes(token));
+    if (encoptsIndex !== -1) {
+      const currentValue = args[encoptsIndex + 1];
+      if (typeof currentValue === 'string' && !currentValue.startsWith('-')) {
+        args[encoptsIndex + 1] = appendThreadLimit(currentValue);
+      } else {
+        args.splice(encoptsIndex + 1, 0, `threads=${threadCount}`);
+      }
+      return args;
+    }
+
+    args.push('--encopts', `threads=${threadCount}`);
+    return args;
   }
 
   static formatCommand(executable, args) {
@@ -330,7 +389,10 @@ export class HandBrakeService {
       args.push('--optimize');
     }
 
-    const additionalArgs = this.parseAdditionalArgs(config.additional_args || '');
+    const additionalArgs = this.mergeConfiguredThreadLimit(
+      this.parseAdditionalArgs(config.additional_args || ''),
+      config.cpu_percent
+    );
     const hasSubtitleOverrides = this.hasOption(additionalArgs, [
       '--all-subtitles',
       '--first-subtitle',

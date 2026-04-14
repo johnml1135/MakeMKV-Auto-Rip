@@ -47,6 +47,13 @@ export function validateHandBrakeConfig(config) {
       errors.push('additional_args must be a string');
     }
 
+    if (
+      config.cpu_percent !== undefined &&
+      (typeof config.cpu_percent !== 'number' || !Number.isFinite(config.cpu_percent) || config.cpu_percent < 1 || config.cpu_percent > 100)
+    ) {
+      errors.push('cpu_percent must be a number between 1 and 100');
+    }
+
     // Validate subtitles config if provided
     if (config.subtitles !== undefined) {
       if (!config.subtitles || typeof config.subtitles !== 'object' || Array.isArray(config.subtitles)) {
@@ -108,6 +115,7 @@ export function getDefaultHandBrakeConfig() {
     preset: "Fast 1080p30",
     output_format: "mp4",
     delete_original: false,
+    cpu_percent: 75,
     additional_args: "",
     subtitles: {
       enabled: true,

@@ -8,6 +8,8 @@ import fs from "fs/promises";
 import path from "path";
 import { spawn } from "child_process";
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
+import { AppConfig } from "../../config/index.js";
+import { DiscService } from "../../services/disc.service.js";
 import { Logger } from "../../utils/logger.js";
 import {
   broadcastStatusUpdate,
@@ -20,6 +22,159 @@ const router = Router();
 let currentOperation = null;
 let operationStatus = "idle"; // idle, loading, ejecting, ripping
 let currentProcess = null; // Store reference to current running process
+let ripModeEnabled = false;
+let ripModeLoop = null;
+
+function getCanStop() {
+  return currentProcess !== null || (operationStatus === "ripping" && ripModeEnabled);
+}
+
+function broadcastCurrentStatus() {
+  broadcastStatusUpdate(operationStatus, currentOperation, {
+    canStop: getCanStop(),
+  });
+}
+
+function setOperationState(status, operation = null) {
+  operationStatus = status;
+  currentOperation = operation;
+  broadcastCurrentStatus();
+}
+
+function resetOperationState() {
+  operationStatus = "idle";
+  currentOperation = null;
+  currentProcess = null;
+  broadcastCurrentStatus();
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRipPollIntervalMs() {
+  return Math.max(AppConfig.mountPollInterval * 1000, 1000);
+}
+
+async function detectDiscsForRipMode() {
+  try {
+    return await DiscService.detectAvailableDiscs();
+  } catch (error) {
+    Logger.error("Rip mode disc detection failed", error.message);
+    broadcastLogMessage(
+      "error",
+      `Rip mode disc detection failed: ${error.message}`
+    );
+    return [];
+  }
+}
+
+async function waitForDiscPresence(hasDisc, waitingMessage) {
+  while (ripModeEnabled) {
+    setOperationState("ripping", waitingMessage);
+
+    const detectedDiscs = await detectDiscsForRipMode();
+    if ((detectedDiscs.length > 0) === hasDisc) {
+      return detectedDiscs;
+    }
+
+    await wait(getRipPollIntervalMs());
+  }
+
+  return [];
+}
+
+async function runRipModeLoop() {
+  broadcastLogMessage(
+    "info",
+    "Rip mode enabled. Waiting for inserted discs..."
+  );
+
+  while (ripModeEnabled) {
+    const detectedDiscs = await waitForDiscPresence(
+      true,
+      "Waiting for disc insertion..."
+    );
+
+    if (!ripModeEnabled) {
+      break;
+    }
+
+    setOperationState(
+      "ripping",
+      `Detected ${detectedDiscs.length} disc(s). Starting rip process...`
+    );
+
+    const result = await executeCliCommand("npm", [
+      "run",
+      "start",
+      "--silent",
+      "--",
+      "--no-confirm",
+      "--quiet",
+    ]);
+
+    if (!ripModeEnabled) {
+      break;
+    }
+
+    if (result.success) {
+      broadcastLogMessage(
+        "success",
+        "Rip cycle completed successfully. Waiting for the next disc..."
+      );
+    } else {
+      broadcastLogMessage(
+        "error",
+        `Rip cycle failed${result.error ? `: ${result.error}` : ""}`
+      );
+    }
+
+    await waitForDiscPresence(false, "Waiting for current disc to be removed...");
+  }
+}
+
+function ensureRipModeLoop() {
+  if (ripModeLoop) {
+    return ripModeLoop;
+  }
+
+  ripModeLoop = (async () => {
+    try {
+      await runRipModeLoop();
+    } catch (error) {
+      Logger.error("Rip mode loop failed", error.message);
+      broadcastLogMessage("error", `Rip mode failed: ${error.message}`);
+    } finally {
+      ripModeLoop = null;
+
+      if (!ripModeEnabled) {
+        resetOperationState();
+      }
+    }
+  })();
+
+  return ripModeLoop;
+}
+
+function stopCurrentOperation(message) {
+  ripModeEnabled = false;
+
+  const processToKill = currentProcess;
+  if (processToKill) {
+    processToKill.kill("SIGTERM");
+
+    setTimeout(() => {
+      if (currentProcess === processToKill && !processToKill.killed) {
+        processToKill.kill("SIGKILL");
+      }
+    }, 3000);
+  } else {
+    resetOperationState();
+  }
+
+  broadcastLogMessage("warn", message);
+}
 
 /**
  * Execute a CLI command and capture its output
@@ -36,6 +191,7 @@ function executeCliCommand(command, args = []) {
 
     // Store reference to current process for potential termination
     currentProcess = childProcess;
+  broadcastCurrentStatus();
 
     let output = "";
     let error = "";
@@ -82,7 +238,7 @@ router.get("/status", async (req, res) => {
     res.json({
       operation: currentOperation,
       status: operationStatus,
-      canStop: currentProcess !== null,
+      canStop: getCanStop(),
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -111,23 +267,8 @@ router.get("/info", async (req, res) => {
  */
 router.post("/stop", async (req, res) => {
   try {
-    if (currentProcess) {
-      currentProcess.kill("SIGTERM");
-
-      // Wait a moment, then force kill if still running
-      setTimeout(() => {
-        if (currentProcess && !currentProcess.killed) {
-          currentProcess.kill("SIGKILL");
-        }
-      }, 3000);
-
-      operationStatus = "idle";
-      currentOperation = null;
-      currentProcess = null;
-
-      broadcastStatusUpdate("idle", null);
-      broadcastLogMessage("warn", "Operation stopped by user");
-
+    if (getCanStop()) {
+      stopCurrentOperation("Operation stopped by user");
       res.json({ success: true, message: "Operation stopped" });
     } else {
       res.status(400).json({ error: "No operation is currently running" });
@@ -151,9 +292,7 @@ router.post("/drives/load", async (req, res) => {
         .json({ error: "Another operation is in progress" });
     }
 
-    operationStatus = "loading";
-    currentOperation = "Loading drives...";
-    broadcastStatusUpdate("loading", "Loading drives...");
+    setOperationState("loading", "Loading drives...");
 
     const result = await executeCliCommand("npm", [
       "run",
@@ -163,9 +302,7 @@ router.post("/drives/load", async (req, res) => {
       "--quiet",
     ]);
 
-    operationStatus = "idle";
-    currentOperation = null;
-    broadcastStatusUpdate("idle", null);
+    resetOperationState();
 
     if (result.success) {
       res.json({ success: true, message: "Drives loaded successfully" });
@@ -173,9 +310,7 @@ router.post("/drives/load", async (req, res) => {
       res.status(500).json({ error: "Failed to load drives: " + result.error });
     }
   } catch (error) {
-    operationStatus = "idle";
-    currentOperation = null;
-    broadcastStatusUpdate("idle", null);
+    resetOperationState();
     Logger.error("Failed to load drives", error.message);
     res.status(500).json({ error: "Failed to load drives: " + error.message });
   }
@@ -192,9 +327,7 @@ router.post("/drives/eject", async (req, res) => {
         .json({ error: "Another operation is in progress" });
     }
 
-    operationStatus = "ejecting";
-    currentOperation = "Ejecting drives...";
-    broadcastStatusUpdate("ejecting", "Ejecting drives...");
+    setOperationState("ejecting", "Ejecting drives...");
 
     const result = await executeCliCommand("npm", [
       "run",
@@ -204,9 +337,7 @@ router.post("/drives/eject", async (req, res) => {
       "--quiet",
     ]);
 
-    operationStatus = "idle";
-    currentOperation = null;
-    broadcastStatusUpdate("idle", null);
+    resetOperationState();
 
     if (result.success) {
       res.json({ success: true, message: "Drives ejected successfully" });
@@ -216,9 +347,7 @@ router.post("/drives/eject", async (req, res) => {
         .json({ error: "Failed to eject drives: " + result.error });
     }
   } catch (error) {
-    operationStatus = "idle";
-    currentOperation = null;
-    broadcastStatusUpdate("idle", null);
+    resetOperationState();
     Logger.error("Failed to eject drives", error.message);
     res.status(500).json({ error: "Failed to eject drives: " + error.message });
   }
@@ -303,30 +432,14 @@ router.post("/config/structured", async (req, res) => {
     }
 
     // Track if we need to kill a process
-    const wasRunning = operationStatus !== "idle" && currentProcess;
+    const wasRunning = operationStatus !== "idle";
 
     // If not idle, kill the current process before saving config
     if (wasRunning) {
       Logger.info("Stopping current operation to save configuration...");
 
-      // Kill the current process
       try {
-        currentProcess.kill("SIGTERM");
-
-        // Give it a moment to terminate gracefully, then force kill if needed
-        setTimeout(() => {
-          if (currentProcess && !currentProcess.killed) {
-            currentProcess.kill("SIGKILL");
-          }
-        }, 3000);
-
-        // Reset state
-        operationStatus = "idle";
-        currentOperation = null;
-        currentProcess = null;
-
-        // Broadcast status update
-        broadcastStatusUpdate("idle", null);
+        stopCurrentOperation("Operation stopped to save configuration");
       } catch (killError) {
         Logger.error("Failed to stop current process", killError.message);
         // Continue with config save even if kill failed
@@ -541,53 +654,16 @@ router.post("/rip/start", async (req, res) => {
         .json({ error: "Another operation is in progress" });
     }
 
-    operationStatus = "ripping";
-    currentOperation = "Starting rip process...";
-    broadcastStatusUpdate("ripping", "Starting rip process...");
+    ripModeEnabled = true;
+    setOperationState("ripping", "Starting rip mode...");
 
-    // Start the ripping process in the background using CLI
-    setImmediate(async () => {
-      try {
-        const result = await executeCliCommand("npm", [
-          "run",
-          "start",
-          "--silent",
-          "--",
-          "--no-confirm",
-          "--quiet",
-        ]);
+    // Keep rip mode running in the background until the user stops it.
+    void ensureRipModeLoop();
 
-        operationStatus = "idle";
-        currentOperation = null;
-        broadcastStatusUpdate("idle", null);
-
-        if (result.success) {
-          broadcastLogMessage(
-            "success",
-            "Ripping process completed successfully"
-          );
-        } else {
-          broadcastLogMessage(
-            "error",
-            `Ripping process failed: ${result.error}`
-          );
-        }
-      } catch (error) {
-        Logger.error("Ripping process failed", error.message);
-        operationStatus = "idle";
-        currentOperation = null;
-        broadcastStatusUpdate("idle", null);
-        broadcastLogMessage(
-          "error",
-          `Ripping process failed: ${error.message}`
-        );
-      }
-    });
-
-    res.json({ success: true, message: "Ripping process started" });
+    res.json({ success: true, message: "Rip mode enabled" });
   } catch (error) {
-    operationStatus = "idle";
-    currentOperation = null;
+    ripModeEnabled = false;
+    resetOperationState();
     Logger.error("Failed to start ripping", error.message);
     res
       .status(500)

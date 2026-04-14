@@ -60,6 +60,9 @@ handbrake:
   output_format: "mp4"
   # Delete original MKV file after successful conversion (true/false)
   delete_original: true
+  # Percentage of available logical CPU cores to use for HandBrake encoding.
+  # Set to 100 to allow HandBrake to use all available logical CPU cores.
+  cpu_percent: 75
 
   # Subtitle handling (HandBrakeCLI)
   subtitles:
@@ -86,6 +89,7 @@ handbrake:
   # Examples:
   # - Try to include all subtitles (works best for text-based subs): "--all-subtitles"
   # - Include all English subtitles: "--subtitle-lang-list eng --all-subtitles"
+  # - Override CPU thread calculation directly: "--encopts threads=4"
   additional_args: ""
 
 # Interface behavior settings
