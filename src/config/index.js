@@ -129,6 +129,48 @@ export class AppConfig {
     return mode === "sync" ? "sync" : "async";
   }
 
+  /**
+   * Whether ddrescue-based read-error recovery is enabled for damaged discs
+   * @returns {boolean}
+   */
+  static get isReadErrorRecoveryEnabled() {
+    const config = this.#loadConfig();
+    return Boolean(config.ripping?.recover_read_errors);
+  }
+
+  /**
+   * Settings for the ddrescue/MSYS2 read-error recovery flow
+   * @returns {{msys2Dir: string, devicePrefix: string, devicePath: string, workDir: string, keepImage: boolean, retries: number, timeout: string, maxRuntime: string, reversePass: boolean, direct: boolean, resume: boolean, imageRetentionDays: number, minFreeGb: number}}
+   */
+  static get readErrorRecovery() {
+    const config = this.#loadConfig();
+    const recovery = config.ripping?.recovery || {};
+    const trimmedString = (value, fallback) =>
+      typeof value === "string" && value.trim() !== "" ? value.trim() : fallback;
+    const nonNegInt = (value, fallback) =>
+      Number.isInteger(value) && value >= 0 ? value : fallback;
+    const nonNegNum = (value, fallback) =>
+      typeof value === "number" && value >= 0 ? value : fallback;
+
+    return {
+      msys2Dir: trimmedString(recovery.msys2_dir, "C:/msys64"),
+      devicePrefix: trimmedString(recovery.device_prefix, "/dev/sr"),
+      devicePath: trimmedString(recovery.device_path, ""),
+      workDir: trimmedString(recovery.work_dir, ""),
+      keepImage: Boolean(recovery.keep_image),
+      retries: nonNegInt(recovery.retries, 3),
+      timeout: trimmedString(recovery.timeout, ""),
+      maxRuntime: trimmedString(recovery.max_runtime, ""),
+      reversePass: recovery.reverse_pass !== undefined
+        ? Boolean(recovery.reverse_pass)
+        : true,
+      direct: Boolean(recovery.direct),
+      resume: recovery.resume !== undefined ? Boolean(recovery.resume) : true,
+      imageRetentionDays: nonNegInt(recovery.image_retention_days, 7),
+      minFreeGb: nonNegNum(recovery.min_free_gb, 10),
+    };
+  }
+
   static get mountWaitTimeout() {
     const config = this.#loadConfig();
     const timeout = config.mount_detection?.wait_timeout;

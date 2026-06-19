@@ -77,6 +77,16 @@ export const MAKEMKV_VERSION_MESSAGES = Object.freeze({
 });
 
 /**
+ * MakeMKV message codes used to detect disc read-error failures so that the
+ * ddrescue-based recovery flow can be triggered for damaged/scratched discs.
+ */
+export const MAKEMKV_READ_ERROR_MESSAGES = Object.freeze({
+  READ_ERROR: "MSG:2003", // Error '...' occurred while reading '...'
+  TITLE_SAVE_FAILED: "MSG:5003", // Failed to save title N to file ...
+  READ_ERROR_SUMMARY: "MSG:2023", // Encountered N errors of type 'Read Error'
+});
+
+/**
  * Default MakeMKV installation paths by platform.
  * These are the most common installation locations for each platform
  */

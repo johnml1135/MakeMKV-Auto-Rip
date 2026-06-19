@@ -66,6 +66,9 @@ vi.mock("../../src/services/handbrake.service.js", () => ({
 vi.mock("../../src/utils/process.js", () => ({
   safeExit: vi.fn(),
   withSystemDate: vi.fn((date, callback) => callback()),
+  // Mirror the real helper closely enough for the cancel test: it terminates
+  // the child (the real one tree-kills on Windows / falls back to child.kill).
+  killProcessTree: vi.fn((child) => child?.kill?.("SIGTERM")),
 }));
 
 vi.mock("../../src/utils/makemkv-messages.js", () => ({

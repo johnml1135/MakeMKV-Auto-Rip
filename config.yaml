@@ -43,6 +43,52 @@ ripping:
   # Ripping mode - async for parallel processing, sync for sequential (async/sync)
   mode: "async"
 
+  # Read-error recovery for damaged/scratched discs (Windows-only).
+  # When a title fails to rip because of physical disc read errors, the app images
+  # the disc with GNU ddrescue (skipping unreadable areas) and re-rips the failed
+  # title(s) from that image. You lose only the unreadable seconds instead of the
+  # whole title. Requires MSYS2 with a ddrescue binary (see scripts/ddrescue-recover.sh).
+  # Off by default; normal rips are unaffected.
+  recover_read_errors: false
+  recovery:
+    # MSYS2 installation root (must contain usr\bin\bash.exe and a built ddrescue)
+    msys2_dir: "C:/msys64"
+    # Optical device path inside MSYS2; the MakeMKV drive number is appended,
+    # e.g. drive 0 -> /dev/sr0
+    device_prefix: "/dev/sr"
+    # Optional full device-node override (e.g. "/dev/sr0"). When set, it is used
+    # verbatim and device_prefix + drive number are ignored. Handy for a
+    # single-drive PC where the MSYS2 node number differs from the MakeMKV one.
+    device_path: ""
+    # Directory for the temporary ddrescue image (.iso + .map). Leave empty to use
+    # a dedicated temp dir (recommended) so multi-GB images never land in the media
+    # library. Set a path to keep images on a specific (roomy) drive.
+    work_dir: ""
+    # Keep the ddrescue disc image (.iso + .map) after a successful re-rip (true/false)
+    keep_image: false
+    # ddrescue retry count for the scraping passes
+    retries: 3
+    # Abort a pass when no data has been read for this long (e.g. "30m", "1h").
+    # Stops a dying drive from spinning for hours. Leave empty to disable.
+    timeout: "30m"
+    # Hard wall-clock ceiling for the whole recovery (all passes combined), e.g.
+    # "90m"/"2h". Unlike `timeout` (which only bounds idle time), this stops a disc
+    # that reads slowly-but-steadily through a huge bad region. Empty disables.
+    max_runtime: "90m"
+    # Add a reverse-direction scraping pass; often recovers a few extra sectors (true/false)
+    reverse_pass: true
+    # Use direct disc access (-d / O_DIRECT). More accurate error reporting on raw
+    # devices, but may be unsupported under Cygwin/MSYS2 - leave off unless tested.
+    direct: false
+    # Resume from an existing image+mapfile when one is found (true/false). Turn off
+    # if you swap discs that share a volume label and don't want a stale resume.
+    resume: true
+    # Delete abandoned recovery images (.iso/.map) older than this many days at the
+    # start of a run. 0 disables the sweep.
+    image_retention_days: 7
+    # Require at least this many GB free in the working directory before imaging.
+    min_free_gb: 10
+
 # HandBrake post-processing settings
 handbrake:
   # Enable HandBrake post-processing after ripping (true/false)
