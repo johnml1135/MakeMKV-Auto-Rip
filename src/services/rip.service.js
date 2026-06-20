@@ -598,7 +598,8 @@ export class RipService {
           commandDataItem.driveNumber,
           imagePath,
           {
-            onProgress: (line) => Logger.info(`[ddrescue] ${line}`),
+            onProgress: (line) =>
+            Logger.info(`[ddrescue] ${line.replace(/^ddrescue-recover:\s*/, "")}`),
             onChild: (child) => {
               recoveryCleanup = this.registerRipProcess(child);
             },

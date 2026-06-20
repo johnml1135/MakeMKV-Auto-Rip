@@ -16,6 +16,7 @@ const DEFAULT_RECOVERY = {
   devicePath: "",
   workDir: "",
   keepImage: false,
+  passes: 1,
   retries: 3,
   timeout: "30m",
   reversePass: true,
@@ -158,6 +159,7 @@ describe("RecoveryService", () => {
     it("invokes bash with the device, image path, and tuning environment", async () => {
       mockConfig.AppConfig.readErrorRecovery = {
         ...DEFAULT_RECOVERY,
+        passes: 2,
         retries: 5,
         timeout: "45m",
         reversePass: false,
@@ -178,6 +180,7 @@ describe("RecoveryService", () => {
       // Retry count is passed via the environment, not the positional args.
       expect(command).not.toContain("'5'");
 
+      expect(options.env.DDR_PASSES).toBe("2");
       expect(options.env.DDR_RETRIES).toBe("5");
       expect(options.env.DDR_TIMEOUT).toBe("45m");
       expect(options.env.DDR_REVERSE).toBe("0");

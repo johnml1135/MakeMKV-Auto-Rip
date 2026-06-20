@@ -169,13 +169,14 @@ export class RecoveryService {
     return new Promise((resolve, reject) => {
       const bash = this.getBashPath();
       const device = this.mapDriveToDevice(driveNumber);
-      const { retries, timeout, maxRuntime, reversePass, direct, resume } =
+      const { passes, retries, timeout, maxRuntime, reversePass, direct, resume } =
         AppConfig.readErrorRecovery;
 
       // Tuning is passed through the environment so the positional command stays
       // simple. The script reads DDR_* with sane defaults if any are missing.
       const env = {
         ...process.env,
+        DDR_PASSES: String(passes),
         DDR_RETRIES: String(retries),
         DDR_TIMEOUT: timeout || "",
         DDR_MAX_RUNTIME: String(this.parseDurationToSeconds(maxRuntime)),

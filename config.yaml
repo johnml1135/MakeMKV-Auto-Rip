@@ -49,7 +49,7 @@ ripping:
   # title(s) from that image. You lose only the unreadable seconds instead of the
   # whole title. Requires MSYS2 with a ddrescue binary (see scripts/ddrescue-recover.sh).
   # Off by default; normal rips are unaffected.
-  recover_read_errors: false
+  recover_read_errors: true
   recovery:
     # MSYS2 installation root (must contain usr\bin\bash.exe and a built ddrescue)
     msys2_dir: "C:/msys64"
@@ -66,7 +66,12 @@ ripping:
     work_dir: ""
     # Keep the ddrescue disc image (.iso + .map) after a successful re-rip (true/false)
     keep_image: false
-    # ddrescue retry count for the scraping passes
+    # How many ddrescue passes to run (1-3). Pass 1 is the fast copy that grabs
+    # everything readable (usually 99%+ of the disc in minutes); passes 2-3 are
+    # slow scraping retries of the damaged areas that typically recover very
+    # little for a large time cost. Default 1 - raise only for badly damaged discs.
+    passes: 1
+    # ddrescue retry count for the scraping passes (only used when passes >= 2)
     retries: 3
     # Abort a pass when no data has been read for this long (e.g. "30m", "1h").
     # Stops a dying drive from spinning for hours. Leave empty to disable.
@@ -75,7 +80,8 @@ ripping:
     # "90m"/"2h". Unlike `timeout` (which only bounds idle time), this stops a disc
     # that reads slowly-but-steadily through a huge bad region. Empty disables.
     max_runtime: "90m"
-    # Add a reverse-direction scraping pass; often recovers a few extra sectors (true/false)
+    # Add a reverse-direction scraping pass (the 3rd pass); often recovers a few
+    # extra sectors. Only runs when passes >= 3. (true/false)
     reverse_pass: true
     # Use direct disc access (-d / O_DIRECT). More accurate error reporting on raw
     # devices, but may be unsupported under Cygwin/MSYS2 - leave off unless tested.

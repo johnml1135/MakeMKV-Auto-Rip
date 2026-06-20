@@ -140,7 +140,7 @@ export class AppConfig {
 
   /**
    * Settings for the ddrescue/MSYS2 read-error recovery flow
-   * @returns {{msys2Dir: string, devicePrefix: string, devicePath: string, workDir: string, keepImage: boolean, retries: number, timeout: string, maxRuntime: string, reversePass: boolean, direct: boolean, resume: boolean, imageRetentionDays: number, minFreeGb: number}}
+   * @returns {{msys2Dir: string, devicePrefix: string, devicePath: string, workDir: string, keepImage: boolean, passes: number, retries: number, timeout: string, maxRuntime: string, reversePass: boolean, direct: boolean, resume: boolean, imageRetentionDays: number, minFreeGb: number}}
    */
   static get readErrorRecovery() {
     const config = this.#loadConfig();
@@ -158,6 +158,7 @@ export class AppConfig {
       devicePath: trimmedString(recovery.device_path, ""),
       workDir: trimmedString(recovery.work_dir, ""),
       keepImage: Boolean(recovery.keep_image),
+      passes: nonNegInt(recovery.passes, 1) || 1,
       retries: nonNegInt(recovery.retries, 3),
       timeout: trimmedString(recovery.timeout, ""),
       maxRuntime: trimmedString(recovery.max_runtime, ""),
