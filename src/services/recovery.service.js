@@ -712,20 +712,6 @@ export class RecoveryProgressTracker {
   }
 
   /**
-   * @returns {{damagedAreaSec: number, badAreas: number, badBytes: number,
-   *   readErrors: number, pctRescued: number}} totals for the run
-   */
-  totals() {
-    return {
-      damagedAreaSec: Math.round(this.damagedAreaMs / 1000),
-      badAreas: this.latest?.badAreas ?? 0,
-      badBytes: this.latest?.badBytes ?? 0,
-      readErrors: this.latest?.readErrors ?? 0,
-      pctRescued: this.latest?.pctRescued ?? 0,
-    };
-  }
-
-  /**
    * @param {Object} current
    * @param {Object} previous
    * @returns {boolean} whether the interval between two samples was spent on

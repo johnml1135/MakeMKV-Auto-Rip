@@ -237,9 +237,49 @@ describe("RipService read-error recovery orchestration", () => {
   it("skips recovery when the disc was removed mid-rip", async () => {
     recoveryMock.isMediumAbsentFailure.mockReturnValue(true);
 
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    const recovered = await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
 
     expect(recoveryMock.recoverDiscToImage).not.toHaveBeenCalled();
+    expect(recovered).toBe(false);
+  });
+
+  describe("reported outcome", () => {
+    it("reports success only when a title was actually produced", async () => {
+      readdirResults.push([], ["Movie_t00.mkv"]);
+
+      await expect(
+        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+      ).resolves.toBe(true);
+    });
+
+    it("reports failure when recovery produced nothing", async () => {
+      readdirResults.push([], [], []); // snapshot, per-title, fallback: all empty
+
+      await expect(
+        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+      ).resolves.toBe(false);
+    });
+
+    it("reports failure when recovery is disabled or unavailable", async () => {
+      mockAppConfig.AppConfig.isReadErrorRecoveryEnabled = false;
+      await expect(
+        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+      ).resolves.toBe(false);
+
+      mockAppConfig.AppConfig.isReadErrorRecoveryEnabled = true;
+      recoveryMock.isAvailable.mockResolvedValue(false);
+      await expect(
+        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+      ).resolves.toBe(false);
+    });
+
+    it("reports failure when imaging fails", async () => {
+      recoveryMock.recoverDiscToImage.mockRejectedValue(new Error("read fail"));
+
+      await expect(
+        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+      ).resolves.toBe(false);
+    });
   });
 
   describe("recovery time budget", () => {

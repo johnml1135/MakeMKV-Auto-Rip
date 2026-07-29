@@ -19,9 +19,6 @@ import { ProgressHeartbeat } from "../utils/heartbeat.js";
 import { safeExit, withSystemDate, killProcessTree } from "../utils/process.js";
 import { MakeMKVMessages } from "../utils/makemkv-messages.js";
 
-/** How often to log progress during a long rip or recovery. */
-const RIP_PROGRESS_INTERVAL_MS = 60_000;
-
 /**
  * Service for handling DVD/Blu-ray ripping operations
  */
@@ -395,30 +392,31 @@ export class RipService {
           }
 
           if (err || stderr) {
-            // A hard MakeMKV failure may still be a recoverable read-error disc.
-            // Try recovery on the captured output before giving up, so we don't
-            // skip recovery exactly when the disc is in its worst shape.
+            // A hard MakeMKV failure may still be a recoverable read-error disc,
+            // so try recovery on the captured output before giving up - the disc
+            // is in its worst shape exactly here. attemptReadErrorRecovery does
+            // its own gating (enabled, damaged rather than removed, tooling
+            // present) and reports whether it actually produced a title.
             const combined = `${stdout || ""}${stderr || ""}`;
-            if (
-              AppConfig.isReadErrorRecoveryEnabled &&
-              RecoveryService.isReadErrorFailure(combined)
-            ) {
-              try {
-                await this.attemptReadErrorRecovery(
-                  combined,
-                  commandDataItem,
-                  dir,
-                  Date.now() - ripStartedAtMs
-                );
-                await this.ejectCompletedDisc(commandDataItem);
-                resolve(commandDataItem.title);
-                return;
-              } catch (recoveryError) {
-                Logger.error(
-                  `Recovery after MakeMKV error failed for ${commandDataItem.title}`,
-                  recoveryError
-                );
-              }
+            let recovered = false;
+            try {
+              recovered = await this.attemptReadErrorRecovery(
+                combined,
+                commandDataItem,
+                dir,
+                Date.now() - ripStartedAtMs
+              );
+            } catch (recoveryError) {
+              Logger.error(
+                `Recovery after MakeMKV error failed for ${commandDataItem.title}`,
+                recoveryError
+              );
+            }
+
+            if (recovered) {
+              await this.ejectCompletedDisc(commandDataItem);
+              resolve(commandDataItem.title);
+              return;
             }
 
             Logger.error(
@@ -514,7 +512,6 @@ export class RipService {
     });
 
     const heartbeat = new ProgressHeartbeat({
-      intervalMs: RIP_PROGRESS_INTERVAL_MS,
       describe: () => {
         const nowMs = Date.now();
         const elapsed = formatDuration(Math.round((nowMs - startedAtMs) / 1000));
@@ -661,7 +658,8 @@ export class RipService {
    *   used when MakeMKV aborted before logging a "Saving into directory" line.
    * @param {number} [ripDurationMs] - How long the failed rip ran, used to
    *   budget how long recovery may spend imaging the disc.
-   * @returns {Promise<void>}
+   * @returns {Promise<boolean>} whether recovery produced at least one title,
+   *   so a caller handling a failed rip knows if the disc was salvaged
    */
   async attemptReadErrorRecovery(
     stdout,
@@ -670,7 +668,7 @@ export class RipService {
     ripDurationMs = 0
   ) {
     if (!AppConfig.isReadErrorRecoveryEnabled) {
-      return;
+      return false;
     }
 
     if (RecoveryService.isMediumAbsentFailure(stdout)) {
@@ -680,11 +678,11 @@ export class RipService {
         `${commandDataItem.title}: the drive reported no disc during the rip ` +
           "(tray opened or disc removed). Skipping read-error recovery - re-insert the disc and rip it again."
       );
-      return;
+      return false;
     }
 
     if (!RecoveryService.isReadErrorFailure(stdout)) {
-      return;
+      return false;
     }
 
     const failedIds = RecoveryService.getFailedTitleIds(stdout);
@@ -701,18 +699,18 @@ export class RipService {
       Logger.warning(
         "Read-error recovery (ddrescue/MSYS2) is only supported on Windows. Skipping recovery."
       );
-      return;
+      return false;
     }
 
     if (this.cancelRequested) {
-      return;
+      return false;
     }
 
     if (!(await RecoveryService.isAvailable())) {
       Logger.warning(
         "Read-error recovery is enabled but MSYS2/ddrescue is unavailable. Skipping recovery."
       );
-      return;
+      return false;
     }
 
     // Prefer the dir we created for the rip: a whole-disc abort may never log a
@@ -722,7 +720,7 @@ export class RipService {
       Logger.error(
         "Read-error recovery: could not determine the MakeMKV output folder. Skipping recovery."
       );
-      return;
+      return false;
     }
 
     const recovery = AppConfig.readErrorRecovery;
@@ -738,7 +736,7 @@ export class RipService {
       Logger.error(
         `Read-error recovery: could not create working directory ${imageDir}: ${error.message}`
       );
-      return;
+      return false;
     }
 
     // Reap abandoned images from prior runs before we add another.
@@ -757,7 +755,7 @@ export class RipService {
       Logger.warning(
         `Read-error recovery for ${commandDataItem.title} is already in progress elsewhere; skipping to avoid drive contention.`
       );
-      return;
+      return false;
     }
 
     try {
@@ -767,7 +765,7 @@ export class RipService {
         Logger.error(
           `Read-error recovery: less than ${recovery.minFreeGb} GB free in ${imageDir}; skipping to avoid filling the disk.`
         );
-        return;
+        return false;
       }
 
       // Snapshot existing MKVs (name + size + mtime) so we detect both brand-new
@@ -783,7 +781,6 @@ export class RipService {
       const budgetSec = this.getRecoveryBudgetSeconds(ripDurationMs);
       const tracker = new RecoveryProgressTracker({ budgetSec });
       const heartbeat = new ProgressHeartbeat({
-        intervalMs: RIP_PROGRESS_INTERVAL_MS,
         describe: () => `[ddrescue] ${commandDataItem.title}: ${tracker.summary()}`,
       });
 
@@ -817,7 +814,7 @@ export class RipService {
         // Keep the partial image + mapfile so a later run can resume the unread
         // areas (e.g. after cleaning the disc) rather than starting from scratch.
         Logger.info(`Keeping partial recovery image for resume: ${imagePath}`);
-        return;
+        return false;
       } finally {
         stopHeartbeat();
         recoveryCleanup();
@@ -829,7 +826,7 @@ export class RipService {
 
       if (this.cancelRequested) {
         Logger.info(`Recovery cancelled; keeping image for resume: ${imagePath}`);
-        return;
+        return false;
       }
 
       // Report how much was recovered and guard against re-ripping an image that
@@ -844,7 +841,7 @@ export class RipService {
           Logger.warning(
             `Read-error recovery recovered no readable data for ${commandDataItem.title}; keeping image for a later resume.`
           );
-          return;
+          return false;
         }
       }
 
@@ -903,6 +900,8 @@ export class RipService {
         producedFiles: recoveredFiles.length > 0,
         hasBadSectors: Boolean(summary && summary.badBytes > 0),
       });
+
+      return recoveredFiles.length > 0;
     } finally {
       this.releaseImageLock(lock);
     }

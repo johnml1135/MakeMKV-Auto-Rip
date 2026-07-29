@@ -153,7 +153,7 @@ describe("RecoveryProgressTracker", () => {
     tracker.update(
       RecoveryService.parseDdrescueStatus(statusBlock({ readErrors: 1 }))
     );
-    expect(tracker.totals().damagedAreaSec).toBe(0);
+    expect(tracker.summary()).toContain("0s of it on damaged areas");
 
     // The next five seconds turn up two more read errors.
     clock.ms = 15_000;
@@ -163,11 +163,9 @@ describe("RecoveryProgressTracker", () => {
       )
     );
 
-    expect(tracker.totals()).toMatchObject({
-      damagedAreaSec: 5,
-      badAreas: 2,
-      readErrors: 3,
-    });
+    const summary = tracker.summary();
+    expect(summary).toContain("5s of it on damaged areas");
+    expect(summary).toContain("2 damaged area(s)");
   });
 
   it("counts scraping and retry phases as damaged-area time", () => {
@@ -182,7 +180,7 @@ describe("RecoveryProgressTracker", () => {
       )
     );
 
-    expect(tracker.totals().damagedAreaSec).toBe(20);
+    expect(tracker.summary()).toContain("20s of it on damaged areas");
   });
 
   it("summarises progress, damage and remaining budget", () => {

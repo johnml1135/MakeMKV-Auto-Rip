@@ -125,16 +125,6 @@ export class FileSystemUtils {
   }
 
   /**
-   * Check if a directory exists, create it if it doesn't
-   * @param {string} dirPath - The directory path to check/create
-   */
-  static ensureDirectoryExists(dirPath) {
-    if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true });
-    }
-  }
-
-  /**
    * Detect MakeMKV installation path for the current platform
    * @returns {Promise<string|null>} - Path to MakeMKV directory or null if not found
    */
