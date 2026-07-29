@@ -10,6 +10,7 @@ import { DriveService } from "./drive.service.js";
 import { HandBrakeService } from "./handbrake.service.js";
 import { STALL_NOTICE_SEC } from "./recovery.service.js";
 import { ReadErrorRecovery } from "./read-error-recovery.js";
+import { EncodeQueue } from "./encode-queue.js";
 import { formatDuration } from "../utils/format.js";
 import { ProgressHeartbeat } from "../utils/heartbeat.js";
 import { safeExit, withSystemDate, killProcessTree } from "../utils/process.js";
@@ -31,12 +32,6 @@ export class RipService {
   constructor(options = {}) {
     this.goodVideoArray = [];
     this.badVideoArray = [];
-    this.goodHandBrakeArray = [];
-    this.badHandBrakeArray = [];
-    this.pendingHandBrakeJobs = [];
-    this.activeHandBrakeJob = null;
-    this.handbrakeWorkerPromise = null;
-    this.handbrakeWorkerError = null;
     this.exitOnCriticalError = options.exitOnCriticalError !== false;
     this.backgroundHandBrake = options.backgroundHandBrake === true;
     this.cancelRequested = false;
@@ -44,35 +39,39 @@ export class RipService {
     this.activeRipProcesses = new Set();
     this.abortController = new AbortController();
 
-    // Salvaging a damaged disc is its own workflow; it needs this service's
-    // cancellation and its encode queue, and nothing else from it.
+    // Encoding and damaged-disc salvage are their own workflows. Both need this
+    // service's cancellation and nothing else from it.
+    const cancellation = this.#cancellationSeam();
+    this.encodeQueue = new EncodeQueue({ cancellation });
     this.readErrorRecovery = new ReadErrorRecovery({
-      cancellation: {
-        isCancelled: () => this.cancelRequested,
-        createError: (message) => this.createCancellationError(message),
-        isCancellationError: (error) => this.isCancellationError(error),
-        registerProcess: (child) => this.registerRipProcess(child),
-      },
+      cancellation,
       onRecoveredFiles: (files, outputFolder) =>
-        this.queueForEncoding(files, outputFolder, "recovered MKV file"),
+        this.encodeQueue.add(files, outputFolder, "recovered MKV file"),
     });
+  }
+
+  /**
+   * The parts of this run's cancellation that collaborators need. The signal is
+   * read lazily because a new run installs a fresh AbortController.
+   * @returns {Object}
+   */
+  #cancellationSeam() {
+    return {
+      isCancelled: () => this.cancelRequested,
+      createError: (message) => this.createCancellationError(message),
+      isCancellationError: (error) => this.isCancellationError(error),
+      registerProcess: (child) => this.registerRipProcess(child),
+      getSignal: () => this.abortController.signal,
+    };
   }
 
   prepareForRun() {
     this.cancelRequested = false;
     this.runCancelled = false;
 
-    // The HandBrake queue and worker are deliberately NOT reset here: the encode
-    // queue outlives the rip cycle that filled it (see `backgroundHandBrake`),
-    // and dropping the worker handle while a worker is still alive would let a
-    // second worker start alongside it. A completed or cancelled run already
-    // leaves the queue empty. Likewise activeRipProcesses, whose entries remove
-    // themselves when their process closes.
-    // A pending error only gets cleared when nobody can still be waiting on it.
-    if (!this.backgroundHandBrake) {
-      this.handbrakeWorkerError = null;
-    }
-
+    // The encode queue is deliberately left alone: it outlives the rip cycle
+    // that filled it (see `backgroundHandBrake`). Likewise activeRipProcesses,
+    // whose entries remove themselves when their process closes.
     if (this.abortController.signal.aborted) {
       this.abortController = new AbortController();
     }
@@ -117,7 +116,7 @@ export class RipService {
 
     this.cancelRequested = true;
     this.runCancelled = true;
-    this.pendingHandBrakeJobs = [];
+    this.encodeQueue.clear();
 
     if (!this.abortController.signal.aborted) {
       this.abortController.abort(this.createCancellationError());
@@ -246,7 +245,7 @@ export class RipService {
           // Hand the encode queue off to the background worker and return: the
           // discs are already ejected, so the drive is free for the next one
           // while HandBrake keeps working.
-          this.startHandBrakeWorker();
+          this.encodeQueue.start();
           this.displayResults({ includeHandBrake: false });
           return;
         }
@@ -566,29 +565,6 @@ export class RipService {
   }
 
   /**
-   * Add freshly written MKV files to the encode queue and make sure a worker is
-   * running. Shared by the normal rip path and read-error recovery.
-   * @param {string[]} files - MKV file names
-   * @param {string} outputFolder - Folder the files are in
-   * @param {string} [label] - What to call them in the log
-   */
-  queueForEncoding(files, outputFolder, label = "MKV file") {
-    if (!AppConfig.isHandBrakeEnabled || this.cancelRequested) {
-      return;
-    }
-
-    for (const file of files) {
-      this.pendingHandBrakeJobs.push({
-        file,
-        fullPath: path.join(outputFolder, file),
-      });
-      Logger.info(`Queued ${label} for HandBrake processing: ${file}`);
-    }
-
-    this.startHandBrakeWorker();
-  }
-
-  /**
    * Handle post-rip completion tasks (logging, validation)
    * @param {string} stdout - MakeMKV output
    * @param {Object} commandDataItem - Disc information object
@@ -651,7 +627,7 @@ export class RipService {
           return;
         }
 
-        this.queueForEncoding(mkvFiles, outputFolder);
+        this.encodeQueue.add(mkvFiles, outputFolder);
       } catch (error) {
         Logger.error("HandBrake post-processing error:", error.message);
         if (error.details) {
