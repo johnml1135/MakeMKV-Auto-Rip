@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 import { parse } from "yaml";
 import { FileSystemUtils } from "../utils/filesystem.js";
 import { Logger } from "../utils/logger.js";
-import { validateHandBrakeConfig, mergeHandBrakeConfig } from "../utils/handbrake-config.js";
+import { validateHandBrakeConfig } from "../utils/handbrake-config.js";
 
 // Get the current file's directory
 const __filename = fileURLToPath(import.meta.url);

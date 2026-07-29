@@ -1,7 +1,7 @@
 /**
- * Unit tests for RipService read-error recovery orchestration:
- * fallback-to-all, resume-aware retention, concurrency lock, free-space gate,
- * and size/mtime-aware new-file detection.
+ * Unit tests for the read-error recovery workflow: fallback-to-all,
+ * resume-aware retention, concurrency lock, free-space gate, the recovery
+ * time budget, and size/mtime-aware new-file detection.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -149,7 +149,9 @@ const fsMock = {
 };
 vi.mock("fs", () => ({ default: fsMock, ...fsMock }));
 
-const { RipService } = await import("../../src/services/rip.service.js");
+const { ReadErrorRecovery } = await import(
+  "../../src/services/read-error-recovery.js"
+);
 
 const READ_ERROR_STDOUT = [
   'MSG:5014,131072,2,"Saving 1 titles into directory file://media/Movie","Saving","1","file://media/Movie"',
@@ -157,9 +159,12 @@ const READ_ERROR_STDOUT = [
 ].join("\n");
 
 const item = { title: "Movie", driveNumber: "0" };
+const OUTPUT_FOLDER = "media/Movie";
 
-describe("RipService read-error recovery orchestration", () => {
+describe("ReadErrorRecovery", () => {
   let rip;
+  let cancelled;
+  let queued;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -184,8 +189,17 @@ describe("RipService read-error recovery orchestration", () => {
     recoveryMock.sweepStaleImages.mockReturnValue([]);
     mockAppConfig.AppConfig.isReadErrorRecoveryEnabled = true;
     mockAppConfig.AppConfig.isHandBrakeEnabled = false;
-    rip = new RipService({ exitOnCriticalError: false });
-    rip.prepareForRun();
+    cancelled = false;
+    queued = [];
+    rip = new ReadErrorRecovery({
+      cancellation: {
+        isCancelled: () => cancelled,
+        createError: (message) => Object.assign(new Error(message), { isCancelled: true }),
+        isCancellationError: (error) => Boolean(error?.isCancelled),
+        registerProcess: () => () => {},
+      },
+      onRecoveredFiles: (files, folder) => queued.push({ files, folder }),
+    });
     vi.spyOn(rip, "ripTitleFromImage").mockResolvedValue("ok");
   });
 
@@ -193,21 +207,21 @@ describe("RipService read-error recovery orchestration", () => {
 
   it("falls back to ripping all titles when per-title re-rip yields nothing", async () => {
     readdirResults.push([], [], ["Movie_t00.mkv"]); // snapshot, post-pertitle, post-fallback
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
     const selectors = rip.ripTitleFromImage.mock.calls.map((c) => c[1]);
     expect(selectors).toEqual(["0", "all"]);
   });
 
   it("does not fall back when the per-title re-rip already produced a file", async () => {
     readdirResults.push([], ["Movie_t00.mkv"]);
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
     const selectors = rip.ripTitleFromImage.mock.calls.map((c) => c[1]);
     expect(selectors).toEqual(["0"]);
   });
 
   it("keeps the image (does not unlink it) when imaging fails", async () => {
     recoveryMock.recoverDiscToImage.mockRejectedValue(new Error("read fail"));
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
     expect(rip.ripTitleFromImage).not.toHaveBeenCalled();
     const unlinked = fsMock.unlinkSync.mock.calls.map((c) => String(c[0]));
     expect(unlinked.some((p) => p.endsWith(".recovery.iso"))).toBe(false);
@@ -216,28 +230,28 @@ describe("RipService read-error recovery orchestration", () => {
   it("skips entirely when another recovery holds the lock for this image", async () => {
     fsState.lockContent = String(process.pid); // a live PID owns the lock
     readdirResults.push([], []);
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
     expect(recoveryMock.recoverDiscToImage).not.toHaveBeenCalled();
   });
 
   it("reclaims a stale lock whose owner process is dead", async () => {
     fsState.lockContent = "999999999"; // almost certainly not a live PID
     readdirResults.push([], ["Movie_t00.mkv"]);
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
     expect(recoveryMock.recoverDiscToImage).toHaveBeenCalledOnce();
   });
 
   it("skips recovery when free space is below the configured minimum", async () => {
     fsMock.statfsSync.mockReturnValueOnce({ bavail: 1, bsize: 4096 }); // ~4 KB free
     readdirResults.push([], []);
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
     expect(recoveryMock.recoverDiscToImage).not.toHaveBeenCalled();
   });
 
   it("skips recovery when the disc was removed mid-rip", async () => {
     recoveryMock.isMediumAbsentFailure.mockReturnValue(true);
 
-    const recovered = await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    const recovered = await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
 
     expect(recoveryMock.recoverDiscToImage).not.toHaveBeenCalled();
     expect(recovered).toBe(false);
@@ -248,7 +262,7 @@ describe("RipService read-error recovery orchestration", () => {
       readdirResults.push([], ["Movie_t00.mkv"]);
 
       await expect(
-        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+        rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER })
       ).resolves.toBe(true);
     });
 
@@ -256,20 +270,20 @@ describe("RipService read-error recovery orchestration", () => {
       readdirResults.push([], [], []); // snapshot, per-title, fallback: all empty
 
       await expect(
-        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+        rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER })
       ).resolves.toBe(false);
     });
 
     it("reports failure when recovery is disabled or unavailable", async () => {
       mockAppConfig.AppConfig.isReadErrorRecoveryEnabled = false;
       await expect(
-        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+        rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER })
       ).resolves.toBe(false);
 
       mockAppConfig.AppConfig.isReadErrorRecoveryEnabled = true;
       recoveryMock.isAvailable.mockResolvedValue(false);
       await expect(
-        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+        rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER })
       ).resolves.toBe(false);
     });
 
@@ -277,7 +291,7 @@ describe("RipService read-error recovery orchestration", () => {
       recoveryMock.recoverDiscToImage.mockRejectedValue(new Error("read fail"));
 
       await expect(
-        rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item)
+        rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER })
       ).resolves.toBe(false);
     });
   });
@@ -285,12 +299,12 @@ describe("RipService read-error recovery orchestration", () => {
   describe("recovery time budget", () => {
     const budgetOf = async (ripDurationMs) => {
       readdirResults.push([], ["Movie_t00.mkv"]);
-      await rip.attemptReadErrorRecovery(
-        READ_ERROR_STDOUT,
-        item,
-        undefined,
-        ripDurationMs
-      );
+      await rip.attempt({
+        stdout: READ_ERROR_STDOUT,
+        disc: item,
+        outputFolder: OUTPUT_FOLDER,
+        ripDurationMs,
+      });
       return recoveryMock.recoverDiscToImage.mock.calls.at(-1)[2]
         .maxRuntimeSeconds;
     };
@@ -317,7 +331,7 @@ describe("RipService read-error recovery orchestration", () => {
 
   it("sweeps stale images before starting", async () => {
     readdirResults.push([], ["Movie_t00.mkv"]);
-    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+    await rip.attempt({ stdout: READ_ERROR_STDOUT, disc: item, outputFolder: OUTPUT_FOLDER });
     expect(recoveryMock.sweepStaleImages).toHaveBeenCalledWith("C:/work", 7);
   });
 
@@ -343,9 +357,9 @@ describe("RipService read-error recovery orchestration", () => {
     });
   });
 
-  describe("cleanupRecoveryArtifacts", () => {
+  describe("cleanupArtifacts", () => {
     it("deletes image+map on a clean success", () => {
-      rip.cleanupRecoveryArtifacts("a.iso", "a.iso.map", {
+      rip.cleanupArtifacts("a.iso", "a.iso.map", {
         keepImage: false,
         producedFiles: true,
         hasBadSectors: false,
@@ -356,7 +370,7 @@ describe("RipService read-error recovery orchestration", () => {
     });
 
     it("keeps image+map when nothing was produced but bad sectors remain", () => {
-      rip.cleanupRecoveryArtifacts("a.iso", "a.iso.map", {
+      rip.cleanupArtifacts("a.iso", "a.iso.map", {
         keepImage: false,
         producedFiles: false,
         hasBadSectors: true,
@@ -365,7 +379,7 @@ describe("RipService read-error recovery orchestration", () => {
     });
 
     it("keeps image when keep_image is set", () => {
-      rip.cleanupRecoveryArtifacts("a.iso", "a.iso.map", {
+      rip.cleanupArtifacts("a.iso", "a.iso.map", {
         keepImage: true,
         producedFiles: true,
         hasBadSectors: false,

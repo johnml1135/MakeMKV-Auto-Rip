@@ -218,7 +218,7 @@ describe("DiscService", () => {
       );
     });
 
-    it("waitForDriveMount should log additional discs found during polling", async () => {
+    it("waitForDriveMount reports every disc once mounting settles", async () => {
       vi.resetModules();
       vi.doMock("../../src/config/index.js", () => ({
         AppConfig: {
@@ -231,15 +231,15 @@ describe("DiscService", () => {
       const module2 = await import("../../src/services/disc.service.js");
       const LocalDiscService2 = module2.DiscService;
 
-      // First attempt: 1 disc, second: 3 discs
+      // First attempt: 1 disc, second: 3 discs (two more finished mounting).
       vi.spyOn(LocalDiscService2, "detectAvailableDiscs")
-        .mockResolvedValueOnce([
-          { driveNumber: "0", title: "A", mediaType: "blu-ray" },
-        ])
-        .mockResolvedValueOnce([
+        .mockResolvedValue([
           { driveNumber: "0", title: "A", mediaType: "blu-ray" },
           { driveNumber: "1", title: "B", mediaType: "dvd" },
           { driveNumber: "2", title: "C", mediaType: "dvd" },
+        ])
+        .mockResolvedValueOnce([
+          { driveNumber: "0", title: "A", mediaType: "blu-ray" },
         ]);
 
       // Mount status: first unmounted, then done
@@ -253,7 +253,7 @@ describe("DiscService", () => {
       }));
 
       const res = await LocalDiscService2.waitForDriveMount();
-      expect(res).toHaveLength(2);
+      expect(res).toHaveLength(3);
     });
 
     it("waitForDriveMount should warn on polling errors and still return results", async () => {
@@ -289,7 +289,7 @@ describe("DiscService", () => {
       expect(detectSpy).toHaveBeenCalled();
     });
 
-    it("waitForDriveMount should return [] when final detection fails after timeout", async () => {
+    it("waitForDriveMount keeps the last discs it saw when a later poll fails", async () => {
       vi.resetModules();
       vi.doMock("../../src/config/index.js", () => ({
         AppConfig: {
@@ -315,11 +315,12 @@ describe("DiscService", () => {
         },
       }));
 
-      // After loop finishes, final call should fail
-      detect.mockRejectedValueOnce(new Error("final failure"));
+      // Every later poll fails; the disc seen on the first one must not be lost.
+      detect.mockRejectedValue(new Error("poll failure"));
+      vi.spyOn(LocalDiscService4, "sleep").mockResolvedValue();
 
       const res = await LocalDiscService4.waitForDriveMount();
-      expect(res).toEqual([]);
+      expect(res).toEqual([{ driveNumber: "0", title: "A", mediaType: "dvd" }]);
     });
 
     it("getDiscFileInfo should reject when MakeMKV version is too old", async () => {
@@ -774,7 +775,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       });
     });
 
-    it("should return empty array when no new discs are found", async () => {
+    it("should report the discs that are already mounted", async () => {
       vi.doMock("../../src/services/drive.service.js", () => ({
         DriveService: {
           getDriveMountStatus: vi
@@ -793,7 +794,8 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
 
       const result = await DiscService.waitForDriveMount();
 
-      expect(result).toHaveLength(0);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({ driveNumber: "0", title: "Movie 1" });
     });
   });
 

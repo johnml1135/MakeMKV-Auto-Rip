@@ -1,7 +1,6 @@
 import { exec } from "child_process";
 import path from "path";
 import fs from "fs";
-import os from "os";
 import { AppConfig } from "../config/index.js";
 import { Logger } from "../utils/logger.js";
 import { FileSystemUtils } from "../utils/filesystem.js";
@@ -9,11 +8,8 @@ import { ValidationUtils } from "../utils/validation.js";
 import { DiscService } from "./disc.service.js";
 import { DriveService } from "./drive.service.js";
 import { HandBrakeService } from "./handbrake.service.js";
-import {
-  RecoveryService,
-  RecoveryProgressTracker,
-  STALL_NOTICE_SEC,
-} from "./recovery.service.js";
+import { STALL_NOTICE_SEC } from "./recovery.service.js";
+import { ReadErrorRecovery } from "./read-error-recovery.js";
 import { formatDuration } from "../utils/format.js";
 import { ProgressHeartbeat } from "../utils/heartbeat.js";
 import { safeExit, withSystemDate, killProcessTree } from "../utils/process.js";
@@ -47,6 +43,19 @@ export class RipService {
     this.runCancelled = false;
     this.activeRipProcesses = new Set();
     this.abortController = new AbortController();
+
+    // Salvaging a damaged disc is its own workflow; it needs this service's
+    // cancellation and its encode queue, and nothing else from it.
+    this.readErrorRecovery = new ReadErrorRecovery({
+      cancellation: {
+        isCancelled: () => this.cancelRequested,
+        createError: (message) => this.createCancellationError(message),
+        isCancellationError: (error) => this.isCancellationError(error),
+        registerProcess: (child) => this.registerRipProcess(child),
+      },
+      onRecoveredFiles: (files, outputFolder) =>
+        this.queueForEncoding(files, outputFolder, "recovered MKV file"),
+    });
   }
 
   prepareForRun() {
@@ -538,29 +547,45 @@ export class RipService {
   }
 
   /**
-   * Work out how long read-error recovery may spend imaging the disc.
-   *
-   * The budget is a multiple of the rip that just failed (default 1x, so a
-   * recovered disc costs roughly twice a normal rip), clamped to a floor so a
-   * rip that failed in the first minute still gets a usable attempt, and to the
-   * configured absolute ceiling.
-   * @param {number} ripDurationMs - How long the failed rip ran
-   * @returns {number} seconds
+   * Try to salvage a disc whose rip hit read errors, before it is ejected.
+   * @param {string} stdout - MakeMKV output from the rip
+   * @param {Object} commandDataItem - Disc information object
+   * @param {string} [ripDir] - Folder this disc was ripped into
+   * @param {number} [ripDurationMs] - How long the rip ran
+   * @returns {Promise<boolean>} whether a title was recovered
    */
-  getRecoveryBudgetSeconds(ripDurationMs) {
-    const recovery = AppConfig.readErrorRecovery;
-    const ceilingSec = RecoveryService.parseDurationToSeconds(recovery.maxRuntime);
-    const floorSec = RecoveryService.parseDurationToSeconds(recovery.minRuntime);
-    const ripSec = Math.max(0, Math.round((ripDurationMs || 0) / 1000));
+  attemptReadErrorRecovery(stdout, commandDataItem, ripDir, ripDurationMs = 0) {
+    return this.readErrorRecovery.attempt({
+      stdout,
+      disc: commandDataItem,
+      // Prefer the dir we created for the rip: a whole-disc abort may never log
+      // a "Saving into directory" line to parse.
+      outputFolder: this.resolveOutputFolder(stdout, ripDir),
+      ripDurationMs,
+    });
+  }
 
-    let budget = Math.round(ripSec * (recovery.maxRuntimeRatio ?? 1));
-    budget = Math.max(budget, floorSec);
-
-    if (ceilingSec > 0) {
-      budget = Math.min(budget, ceilingSec);
+  /**
+   * Add freshly written MKV files to the encode queue and make sure a worker is
+   * running. Shared by the normal rip path and read-error recovery.
+   * @param {string[]} files - MKV file names
+   * @param {string} outputFolder - Folder the files are in
+   * @param {string} [label] - What to call them in the log
+   */
+  queueForEncoding(files, outputFolder, label = "MKV file") {
+    if (!AppConfig.isHandBrakeEnabled || this.cancelRequested) {
+      return;
     }
 
-    return budget;
+    for (const file of files) {
+      this.pendingHandBrakeJobs.push({
+        file,
+        fullPath: path.join(outputFolder, file),
+      });
+      Logger.info(`Queued ${label} for HandBrake processing: ${file}`);
+    }
+
+    this.startHandBrakeWorker();
   }
 
   /**
@@ -626,13 +651,7 @@ export class RipService {
           return;
         }
 
-        for (const file of mkvFiles) {
-          const fullPath = path.join(outputFolder, file);
-          this.pendingHandBrakeJobs.push({ file, fullPath });
-          Logger.info(`Queued MKV file for HandBrake processing: ${file}`);
-        }
-
-        this.startHandBrakeWorker();
+        this.queueForEncoding(mkvFiles, outputFolder);
       } catch (error) {
         Logger.error("HandBrake post-processing error:", error.message);
         if (error.details) {
@@ -646,514 +665,6 @@ export class RipService {
     Logger.separator();
   }
 
-  /**
-   * Recover title(s) that MakeMKV failed to rip due to physical disc read errors.
-   * Images the disc with ddrescue (via MSYS2), skipping unreadable areas, then
-   * re-rips the failed title(s) from the image and queues them for HandBrake.
-   * No-op unless enabled in config, running on Windows, and a read-error failure
-   * is detected. Must run before the disc is ejected.
-   * @param {string} stdout - MakeMKV output from the original (disc) rip
-   * @param {Object} commandDataItem - Disc information object
-   * @param {string} [knownOutputDir] - Fallback output dir from the disc rip,
-   *   used when MakeMKV aborted before logging a "Saving into directory" line.
-   * @param {number} [ripDurationMs] - How long the failed rip ran, used to
-   *   budget how long recovery may spend imaging the disc.
-   * @returns {Promise<boolean>} whether recovery produced at least one title,
-   *   so a caller handling a failed rip knows if the disc was salvaged
-   */
-  async attemptReadErrorRecovery(
-    stdout,
-    commandDataItem,
-    knownOutputDir,
-    ripDurationMs = 0
-  ) {
-    if (!AppConfig.isReadErrorRecoveryEnabled) {
-      return false;
-    }
-
-    if (RecoveryService.isMediumAbsentFailure(stdout)) {
-      // The disc was pulled or the tray opened mid-rip. MakeMKV reports that as
-      // a read error, but there is nothing to image and nothing to recover.
-      Logger.warning(
-        `${commandDataItem.title}: the drive reported no disc during the rip ` +
-          "(tray opened or disc removed). Skipping read-error recovery - re-insert the disc and rip it again."
-      );
-      return false;
-    }
-
-    if (!RecoveryService.isReadErrorFailure(stdout)) {
-      return false;
-    }
-
-    const failedIds = RecoveryService.getFailedTitleIds(stdout);
-    Logger.warning(
-      `Disc read error detected while ripping ${commandDataItem.title}: ` +
-        `${
-          failedIds.length
-            ? `title(s) ${failedIds.join(", ")}`
-            : "one or more titles"
-        } failed to save.`
-    );
-
-    if (process.platform !== "win32") {
-      Logger.warning(
-        "Read-error recovery (ddrescue/MSYS2) is only supported on Windows. Skipping recovery."
-      );
-      return false;
-    }
-
-    if (this.cancelRequested) {
-      return false;
-    }
-
-    if (!(await RecoveryService.isAvailable())) {
-      Logger.warning(
-        "Read-error recovery is enabled but MSYS2/ddrescue is unavailable. Skipping recovery."
-      );
-      return false;
-    }
-
-    // Prefer the dir we created for the rip: a whole-disc abort may never log a
-    // "Saving into directory" line to parse.
-    const outputFolder = this.resolveOutputFolder(stdout, knownOutputDir);
-    if (!outputFolder || !fs.existsSync(outputFolder)) {
-      Logger.error(
-        "Read-error recovery: could not determine the MakeMKV output folder. Skipping recovery."
-      );
-      return false;
-    }
-
-    const recovery = AppConfig.readErrorRecovery;
-
-    // The disc image goes to the configured working directory, or a dedicated
-    // temp dir by default so multi-GB images never pollute the media library.
-    const imageDir =
-      recovery.workDir ||
-      path.join(os.tmpdir(), "makemkv-auto-rip-recovery");
-    try {
-      fs.mkdirSync(imageDir, { recursive: true });
-    } catch (error) {
-      Logger.error(
-        `Read-error recovery: could not create working directory ${imageDir}: ${error.message}`
-      );
-      return false;
-    }
-
-    // Reap abandoned images from prior runs before we add another.
-    RecoveryService.sweepStaleImages(imageDir, recovery.imageRetentionDays);
-
-    const imagePath = path.join(
-      imageDir,
-      `${commandDataItem.title}.recovery.iso`
-    );
-    const mapPath = `${imagePath}.map`;
-
-    // Refuse to run a second recovery against the same image (e.g. a second app
-    // instance) - two ddrescue readers thrash one drive and cripple throughput.
-    const lock = this.acquireImageLock(imagePath);
-    if (!lock) {
-      Logger.warning(
-        `Read-error recovery for ${commandDataItem.title} is already in progress elsewhere; skipping to avoid drive contention.`
-      );
-      return false;
-    }
-
-    try {
-      // Ensure there's room for the image before we start (a full disk mid-image
-      // corrupts the partial and blocks resume).
-      if (!this.hasEnoughFreeSpace(imageDir, recovery.minFreeGb)) {
-        Logger.error(
-          `Read-error recovery: less than ${recovery.minFreeGb} GB free in ${imageDir}; skipping to avoid filling the disk.`
-        );
-        return false;
-      }
-
-      // Snapshot existing MKVs (name + size + mtime) so we detect both brand-new
-      // files and a same-named partial from the failed attempt being overwritten.
-      const beforeFiles = await this.snapshotMkvs(outputFolder);
-
-      if (recovery.resume && fs.existsSync(imagePath) && fs.existsSync(mapPath)) {
-        Logger.info(
-          `Found an existing ddrescue image and mapfile for ${commandDataItem.title}; resuming recovery instead of restarting.`
-        );
-      }
-
-      const budgetSec = this.getRecoveryBudgetSeconds(ripDurationMs);
-      const tracker = new RecoveryProgressTracker({ budgetSec });
-      const heartbeat = new ProgressHeartbeat({
-        describe: () => `[ddrescue] ${commandDataItem.title}: ${tracker.summary()}`,
-      });
-
-      let recoveryCleanup = () => {};
-      let stopHeartbeat = () => {};
-      try {
-        Logger.info(
-          `Imaging ${commandDataItem.title} with ddrescue to recover read errors. ` +
-            `Budget ${formatDuration(budgetSec)} (the rip itself took ${formatDuration(
-              Math.round(ripDurationMs / 1000)
-            )}); progress follows every minute.`
-        );
-        stopHeartbeat = heartbeat.start();
-        await RecoveryService.recoverDiscToImage(
-          commandDataItem.driveNumber,
-          imagePath,
-          {
-            maxRuntimeSeconds: budgetSec,
-            onProgress: (line) =>
-              Logger.info(`[ddrescue] ${line.replace(/^ddrescue-recover:\s*/, "")}`),
-            onStatus: (status) => tracker.update(status),
-            onChild: (child) => {
-              recoveryCleanup = this.registerRipProcess(child);
-            },
-          }
-        );
-      } catch (error) {
-        Logger.error(
-          `ddrescue imaging failed for ${commandDataItem.title}: ${error.message}`
-        );
-        // Keep the partial image + mapfile so a later run can resume the unread
-        // areas (e.g. after cleaning the disc) rather than starting from scratch.
-        Logger.info(`Keeping partial recovery image for resume: ${imagePath}`);
-        return false;
-      } finally {
-        stopHeartbeat();
-        recoveryCleanup();
-        const finalSummary = tracker.finish();
-        if (finalSummary) {
-          Logger.info(`[ddrescue] ${commandDataItem.title}: ${finalSummary}`);
-        }
-      }
-
-      if (this.cancelRequested) {
-        Logger.info(`Recovery cancelled; keeping image for resume: ${imagePath}`);
-        return false;
-      }
-
-      // Report how much was recovered and guard against re-ripping an image that
-      // holds essentially nothing (e.g. disc yanked early).
-      const summary = RecoveryService.summarizeMapfile(mapPath);
-      if (summary) {
-        Logger.info(
-          `[ddrescue] recovered ${summary.rescuedPct.toFixed(2)}% ` +
-            `(${(summary.badBytes / 1048576).toFixed(2)} MB unreadable) of ${commandDataItem.title}.`
-        );
-        if (summary.rescuedBytes === 0) {
-          Logger.warning(
-            `Read-error recovery recovered no readable data for ${commandDataItem.title}; keeping image for a later resume.`
-          );
-          return false;
-        }
-      }
-
-      // Re-rip the failed title(s) from the recovered image. The failed-title id
-      // parsed from the output filename maps to the same MakeMKV title selector,
-      // but if that assumption ever yields nothing we fall back to ripping every
-      // title from the image so a recoverable title is never silently lost.
-      const selectors = failedIds.length ? failedIds.map(String) : ["all"];
-      await this.reRipSelectorsFromImage(imagePath, selectors, outputFolder);
-
-      let recoveredFiles = await this.collectRecoveredMkvs(
-        outputFolder,
-        beforeFiles
-      );
-
-      if (
-        recoveredFiles.length === 0 &&
-        !this.cancelRequested &&
-        !selectors.includes("all")
-      ) {
-        Logger.warning(
-          `Per-title re-rip produced no new titles for ${commandDataItem.title}; falling back to ripping all titles from the recovered image.`
-        );
-        await this.reRipSelectorsFromImage(imagePath, ["all"], outputFolder);
-        recoveredFiles = await this.collectRecoveredMkvs(
-          outputFolder,
-          beforeFiles
-        );
-      }
-
-      if (recoveredFiles.length > 0) {
-        Logger.info(
-          `Recovered ${recoveredFiles.length} title(s) from damaged disc ${commandDataItem.title}: ${recoveredFiles.join(", ")}`
-        );
-
-        if (AppConfig.isHandBrakeEnabled && !this.cancelRequested) {
-          for (const file of recoveredFiles) {
-            this.pendingHandBrakeJobs.push({
-              file,
-              fullPath: path.join(outputFolder, file),
-            });
-            Logger.info(
-              `Queued recovered MKV file for HandBrake processing: ${file}`
-            );
-          }
-          this.startHandBrakeWorker();
-        }
-      } else {
-        Logger.warning(
-          `Read-error recovery did not produce any new titles for ${commandDataItem.title}.`
-        );
-      }
-
-      this.cleanupRecoveryArtifacts(imagePath, mapPath, {
-        keepImage: recovery.keepImage,
-        producedFiles: recoveredFiles.length > 0,
-        hasBadSectors: Boolean(summary && summary.badBytes > 0),
-      });
-
-      return recoveredFiles.length > 0;
-    } finally {
-      this.releaseImageLock(lock);
-    }
-  }
-
-  /**
-   * Decide what to keep after a recovery attempt. We keep the (multi-GB) image
-   * only when it can still help: explicit keep_image, or a failed-but-resumable
-   * attempt (no usable title produced AND bad sectors remain) so the user can
-   * clean the disc and resume. A successful recovery is always cleaned up.
-   * @param {string} imagePath
-   * @param {string} mapPath
-   * @param {{keepImage: boolean, producedFiles: boolean, hasBadSectors: boolean}} outcome
-   */
-  cleanupRecoveryArtifacts(imagePath, mapPath, outcome) {
-    if (outcome.keepImage) {
-      Logger.info(`Keeping ddrescue disc image (keep_image): ${imagePath}`);
-      return;
-    }
-
-    if (!outcome.producedFiles && outcome.hasBadSectors) {
-      Logger.info(
-        `Recovery incomplete; keeping image + mapfile so you can clean the disc and resume: ${imagePath}`
-      );
-      return;
-    }
-
-    this.safeUnlink(imagePath);
-    this.safeUnlink(mapPath);
-    this.safeUnlink(`${imagePath}.size`);
-  }
-
-  /**
-   * Snapshot .mkv files in a directory as name -> {size, mtimeMs}.
-   * @param {string} dir
-   * @returns {Promise<Map<string, {size: number, mtimeMs: number}>>}
-   */
-  async snapshotMkvs(dir) {
-    const map = new Map();
-    for (const name of await FileSystemUtils.readdir(dir)) {
-      if (!name.toLowerCase().endsWith(".mkv")) {
-        continue;
-      }
-      map.set(name, this.statMkv(path.join(dir, name)));
-    }
-    return map;
-  }
-
-  /**
-   * Find .mkv files that are new or changed (size/mtime) versus a snapshot.
-   * Catches both freshly created titles and a same-named partial from the
-   * failed attempt being overwritten by the recovered re-rip.
-   * @param {string} dir
-   * @param {Map<string, {size: number, mtimeMs: number}>} beforeFiles
-   * @returns {Promise<string[]>}
-   */
-  async collectRecoveredMkvs(dir, beforeFiles) {
-    const recovered = [];
-    for (const name of await FileSystemUtils.readdir(dir)) {
-      if (!name.toLowerCase().endsWith(".mkv")) {
-        continue;
-      }
-      const prev = beforeFiles.get(name);
-      const cur = this.statMkv(path.join(dir, name));
-      if (!prev || cur.size !== prev.size || cur.mtimeMs > prev.mtimeMs) {
-        recovered.push(name);
-      }
-    }
-    return recovered;
-  }
-
-  /**
-   * Stat a file, returning a sentinel instead of throwing if it is missing.
-   * @param {string} filePath
-   * @returns {{size: number, mtimeMs: number}}
-   */
-  statMkv(filePath) {
-    try {
-      const s = fs.statSync(filePath);
-      return { size: s.size, mtimeMs: s.mtimeMs };
-    } catch {
-      return { size: -1, mtimeMs: 0 };
-    }
-  }
-
-  /**
-   * Check that a directory's filesystem has at least minFreeGb available.
-   * Returns true (don't block) when free space can't be determined.
-   * @param {string} dir
-   * @param {number} minFreeGb
-   * @returns {boolean}
-   */
-  hasEnoughFreeSpace(dir, minFreeGb) {
-    if (!minFreeGb || minFreeGb <= 0 || typeof fs.statfsSync !== "function") {
-      return true;
-    }
-    try {
-      const { bavail, bsize } = fs.statfsSync(dir);
-      const freeGb = (bavail * bsize) / 1024 ** 3;
-      return freeGb >= minFreeGb;
-    } catch {
-      return true;
-    }
-  }
-
-  /**
-   * Acquire an advisory lock for an image path so two recoveries can't target
-   * the same disc concurrently. A lock whose owner PID is dead is treated as
-   * stale and reclaimed. Returns the lock path, or null if held by a live owner.
-   * @param {string} imagePath
-   * @returns {string|null}
-   */
-  acquireImageLock(imagePath) {
-    const lockPath = `${imagePath}.lock`;
-    // Exclusive create ("wx") is atomic, so two instances racing here cannot both
-    // win. On EEXIST we inspect the owner: reclaim a dead one, yield to a live one.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const fd = fs.openSync(lockPath, "wx");
-        fs.writeSync(fd, String(process.pid));
-        fs.closeSync(fd);
-        return lockPath;
-      } catch (error) {
-        if (error && error.code !== "EEXIST") {
-          // Can't create a lock for some other reason; proceed unlocked rather
-          // than block recovery entirely.
-          return lockPath;
-        }
-        let pid = NaN;
-        try {
-          pid = Number.parseInt(fs.readFileSync(lockPath, "utf8").trim(), 10);
-        } catch {
-          // Unreadable lock - treat as stale below.
-        }
-        if (Number.isInteger(pid) && this.isPidAlive(pid)) {
-          return null; // held by a live owner
-        }
-        this.safeUnlink(lockPath); // stale lock from a dead run - reclaim and retry
-      }
-    }
-    return lockPath;
-  }
-
-  /**
-   * Release a previously acquired image lock.
-   * @param {string|null} lockPath
-   */
-  releaseImageLock(lockPath) {
-    if (lockPath) {
-      this.safeUnlink(lockPath);
-    }
-  }
-
-  /**
-   * @param {number} pid
-   * @returns {boolean} whether the process is currently alive
-   */
-  isPidAlive(pid) {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return error && error.code === "EPERM";
-    }
-  }
-
-  /**
-   * Re-rip the given MakeMKV title selectors from a recovered image, stopping
-   * early if cancellation is requested. Errors are logged, not thrown.
-   * @param {string} imagePath - Path to the ddrescue disc image (.iso)
-   * @param {string[]} selectors - MakeMKV title selectors (ids or "all")
-   * @param {string} outputFolder - Destination directory
-   * @returns {Promise<void>}
-   */
-  async reRipSelectorsFromImage(imagePath, selectors, outputFolder) {
-    for (const selector of selectors) {
-      if (this.cancelRequested) {
-        break;
-      }
-      try {
-        await this.ripTitleFromImage(imagePath, selector, outputFolder);
-      } catch (error) {
-        if (this.isCancellationError(error)) {
-          break;
-        }
-        Logger.error(
-          `Re-rip from recovered image failed (title ${selector}): ${error.message}`
-        );
-      }
-    }
-  }
-
-  /**
-   * Re-rip a single title (or "all") from a recovered disc image using MakeMKV.
-   * @param {string} imagePath - Path to the ddrescue disc image (.iso)
-   * @param {string} selector - MakeMKV title selector (id or "all")
-   * @param {string} outputFolder - Destination directory
-   * @returns {Promise<string>} - MakeMKV output
-   */
-  ripTitleFromImage(imagePath, selector, outputFolder) {
-    return new Promise(async (resolve, reject) => {
-      const makeMKVExecutable = await AppConfig.getMakeMKVExecutable();
-      if (!makeMKVExecutable) {
-        reject(
-          new Error(
-            "MakeMKV executable not found. Please ensure MakeMKV is installed."
-          )
-        );
-        return;
-      }
-
-      const command = `${makeMKVExecutable} -r mkv iso:"${imagePath}" ${selector} "${outputFolder}"`;
-      Logger.info(`Re-ripping title ${selector} from recovered image...`);
-
-      let cleanupProcess = () => {};
-      const childProcess = exec(
-        command,
-        { maxBuffer: 1024 * 1024 * 64 },
-        (err, stdout) => {
-          cleanupProcess();
-
-          if (this.cancelRequested) {
-            reject(this.createCancellationError("Recovery re-rip cancelled"));
-            return;
-          }
-
-          if (err) {
-            reject(err);
-            return;
-          }
-
-          resolve(stdout);
-        }
-      );
-
-      cleanupProcess = this.registerRipProcess(childProcess);
-    });
-  }
-
-  /**
-   * Delete a file if it exists, logging but not throwing on failure.
-   * @param {string} filePath
-   */
-  safeUnlink(filePath) {
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-    } catch (error) {
-      Logger.warning(`Could not delete ${filePath}: ${error.message}`);
-    }
-  }
 
   /**
    * Eject a completed disc so the drive can be reused while HandBrake continues
