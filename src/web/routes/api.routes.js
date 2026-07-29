@@ -6,7 +6,7 @@
 import { Router } from "express";
 import fs from "fs/promises";
 import path from "path";
-import { stringify as yamlStringify, parse as yamlParse } from "yaml";
+import { isScalar, parse as yamlParse, parseDocument } from "yaml";
 import { AppConfig } from "../../config/index.js";
 import { prepareRipRuntime } from "../../app.js";
 import { DiscService } from "../../services/disc.service.js";
@@ -24,7 +24,6 @@ const router = Router();
 let currentOperation = null;
 let operationStatus = "idle"; // idle, loading, ejecting, ripping
 let currentOperationPromise = null;
-let currentStopRequested = false;
 let activeWebLoggerSinkCleanup = null;
 // One RipService for the whole rip-mode session, so its HandBrake queue can
 // keep encoding across disc changes instead of being thrown away each cycle.
@@ -52,7 +51,6 @@ function resetOperationState() {
   operationStatus = "idle";
   currentOperation = null;
   currentOperationPromise = null;
-  currentStopRequested = false;
   broadcastCurrentStatus();
 }
 
@@ -104,7 +102,6 @@ async function runTrackedOperation(operation) {
     return await currentOperationPromise;
   } finally {
     currentOperationPromise = null;
-    currentStopRequested = false;
     broadcastCurrentStatus();
   }
 }
@@ -331,7 +328,6 @@ function ensureRipModeLoop() {
 
 function stopCurrentOperation(message) {
   ripModeEnabled = false;
-  currentStopRequested = true;
 
   // Cancels the in-flight rip and any background encode. Safe to call while the
   // loop is only waiting for a disc: it just marks the session cancelled.
@@ -567,7 +563,7 @@ router.post("/config/structured", async (req, res) => {
     const existingContent = await fs.readFile(configPath, "utf8");
 
     // Update only specific values while preserving all comments and structure
-    const updatedContent = updateYamlValues(existingContent, config);
+    const updatedContent = applyConfigToYaml(existingContent, config);
 
     await fs.writeFile(configPath, updatedContent, "utf8");
 
@@ -586,176 +582,63 @@ router.post("/config/structured", async (req, res) => {
 });
 
 /**
- * Update YAML values while preserving all comments and formatting
+ * Write a nested config object into the YAML source, preserving comments,
+ * key order and formatting.
+ *
+ * Values are set by full key path. A previous version matched keys by name
+ * with a regex, which wrote to whichever line in the file happened to use that
+ * name first - saving `handbrake.enabled` landed on `paths.logging.enabled`.
+ * @param {string} yamlContent - Current config.yaml contents
+ * @param {Object} config - Nested configuration object from the web UI
+ * @returns {string} Updated YAML
  */
-function updateYamlValues(yamlContent, config) {
-  let updatedContent = yamlContent;
+function applyConfigToYaml(yamlContent, config) {
+  const doc = parseDocument(yamlContent);
 
-  // Helper function to properly format YAML values
-  function formatYamlValue(value) {
-    if (typeof value === "string") {
-      // Always quote strings
-      return `"${value}"`;
-    } else if (typeof value === "boolean") {
-      return value.toString();
-    } else if (typeof value === "number") {
-      return value.toString();
-    }
-    return value;
+  for (const [keyPath, value] of flattenConfig(config)) {
+    setYamlValue(doc, keyPath, value);
   }
 
-  // Helper function to update a specific key-value pair
-  function updateKeyValue(content, keyPath, value) {
-    const keys = keyPath.split(".");
-    let currentContent = content;
-
-    if (keys.length === 1) {
-      // Top-level key (e.g., "interface:")
-      const regex = new RegExp(`^(\\s*${keys[0]}\\s*:)\\s*(.*)$`, "m");
-      const match = currentContent.match(regex);
-      if (match) {
-        currentContent = currentContent.replace(
-          regex,
-          `$1 ${formatYamlValue(value)}`
-        );
-      }
-    } else {
-      // Nested key (e.g., "paths.movie_rips_dir")
-      const parentKey = keys[0];
-      const childKey = keys[keys.length - 1];
-
-      // Find the parent section
-      const parentRegex = new RegExp(`^(\\s*${parentKey}\\s*:)`, "m");
-      const parentMatch = currentContent.match(parentRegex);
-
-      if (parentMatch) {
-        // First try to find an active (uncommented) child key
-        const childRegex = new RegExp(`^(\\s+${childKey}\\s*:)\\s*(.*)$`, "m");
-        const childMatch = currentContent.match(childRegex);
-
-        if (childMatch) {
-          // Found active key, update it
-          currentContent = currentContent.replace(
-            childRegex,
-            `$1 ${formatYamlValue(value)}`
-          );
-        } else {
-          // Look for commented version of the key to uncomment and update
-          const commentedRegex = new RegExp(
-            `^(\\s*)#\\s*(${childKey}\\s*:)\\s*(.*)$`,
-            "m"
-          );
-          const commentedMatch = currentContent.match(commentedRegex);
-
-          if (commentedMatch) {
-            // Uncomment and update the value
-            currentContent = currentContent.replace(
-              commentedRegex,
-              `$1$2 ${formatYamlValue(value)}`
-            );
-          } else {
-            // Key doesn't exist, add it after the parent section header
-            const parentIndex = currentContent.search(parentRegex);
-            if (parentIndex !== -1) {
-              const lines = currentContent.split("\n");
-              let insertIndex = -1;
-
-              // Find the line with the parent key
-              for (let i = 0; i < lines.length; i++) {
-                if (lines[i].match(parentRegex)) {
-                  insertIndex = i + 1;
-                  break;
-                }
-              }
-
-              if (insertIndex !== -1) {
-                // Insert the new key after the parent
-                const indent = "  "; // Use 2 spaces for indentation
-                const newLine = `${indent}${childKey}: ${formatYamlValue(
-                  value
-                )}`;
-                lines.splice(insertIndex, 0, newLine);
-                currentContent = lines.join("\n");
-              }
-            }
-          }
-        }
-      }
-    }
-
-    return currentContent;
+  // makemkv_dir is optional: the UI omits it when the path override is off.
+  if (config.paths && !Object.hasOwn(config.paths, "makemkv_dir")) {
+    doc.deleteIn(["paths", "makemkv_dir"]);
   }
 
-  // Function to handle deletion of optional keys
-  function deleteKeyValue(content, keyPath) {
-    const keys = keyPath.split(".");
-
-    if (keys.length === 1) {
-      // Top-level key deletion
-      const regex = new RegExp(`^\\s*${keys[0]}\\s*:.*$`, "m");
-      return content.replace(regex, "");
-    } else {
-      // Nested key deletion
-      const childKey = keys[keys.length - 1];
-      const regex = new RegExp(`^\\s+${childKey}\\s*:.*$`, "m");
-      return content.replace(regex, "");
-    }
-  }
-
-  // Recursively process the config object
-  function processConfigObject(obj, prefix = "") {
-    for (const [key, value] of Object.entries(obj)) {
-      const fullKey = prefix ? `${prefix}.${key}` : key;
-
-      if (
-        value !== null &&
-        typeof value === "object" &&
-        !Array.isArray(value)
-      ) {
-        // Recursively process nested objects
-        processConfigObject(value, fullKey);
-      } else if (value !== undefined) {
-        // Update the value
-        updatedContent = updateKeyValue(updatedContent, fullKey, value);
-      }
-    }
-  }
-
-  // Handle makemkv_dir deletion if it was removed from config
-  if (config.paths && !config.paths.hasOwnProperty("makemkv_dir")) {
-    // Comment out the makemkv_dir line if it exists and is not already commented
-    const makemkvRegex = /^(\s+)(makemkv_dir\s*:.*$)/m;
-    const match = updatedContent.match(makemkvRegex);
-    if (match) {
-      updatedContent = updatedContent.replace(makemkvRegex, "$1# $2");
-    }
-  }
-
-  // Process all the config updates
-  processConfigObject(config);
-
-  return updatedContent;
+  return String(doc);
 }
 
 /**
- * Deep merge utility function for configuration objects
+ * Walk a nested config object, yielding [keyPath, scalarValue] pairs.
+ * @param {Object} value
+ * @param {string[]} [keyPath]
+ * @returns {Generator<[string[], *]>}
  */
-function deepMerge(target, source) {
-  const result = { ...target };
+function* flattenConfig(value, keyPath = []) {
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...keyPath, key];
 
-  for (const key in source) {
-    if (
-      source[key] !== null &&
-      typeof source[key] === "object" &&
-      !Array.isArray(source[key])
-    ) {
-      result[key] = deepMerge(result[key] || {}, source[key]);
-    } else if (source[key] !== undefined) {
-      result[key] = source[key];
+    if (child !== null && typeof child === "object" && !Array.isArray(child)) {
+      yield* flattenConfig(child, childPath);
+    } else if (child !== undefined) {
+      yield [childPath, child];
     }
   }
+}
 
-  return result;
+/**
+ * Set one value in a YAML document. Writing through an existing scalar node
+ * keeps its style, so a quoted path stays quoted instead of churning the file
+ * on every save; a type change (or a new key) falls back to a plain set.
+ */
+function setYamlValue(doc, keyPath, value) {
+  const existing = doc.getIn(keyPath, true);
+
+  if (isScalar(existing) && typeof existing.value === typeof value) {
+    existing.value = value;
+    return;
+  }
+
+  doc.setIn(keyPath, value);
 }
 
 /**
@@ -795,4 +678,4 @@ router.post("/rip/start", async (req, res) => {
   }
 });
 
-export { router as apiRoutes };
+export { router as apiRoutes, applyConfigToYaml };

@@ -28,7 +28,7 @@ export async function loadDrives(flags = {}) {
     if (!flags.quiet) {
       displayHeader();
     }
-    AppConfig.validate();
+    await AppConfig.validate();
 
     if (!flags.quiet) {
       Logger.info("Loading all drives...");
@@ -54,7 +54,7 @@ export async function ejectDrives(flags = {}) {
     if (!flags.quiet) {
       displayHeader();
     }
-    AppConfig.validate();
+    await AppConfig.validate();
 
     if (!flags.quiet) {
       Logger.info("Ejecting all drives...");

@@ -44,7 +44,9 @@ export class FileSystemUtils {
       dir += `-${folderCounter}`;
     }
 
-    fs.mkdirSync(dir);
+    // Recursive so a configured media directory that does not exist yet is
+    // created rather than failing the rip with ENOENT.
+    fs.mkdirSync(dir, { recursive: true });
     return dir;
   }
 
@@ -55,9 +57,8 @@ export class FileSystemUtils {
    */
   static async readdir(dirPath) {
     try {
-      Logger.info(`Reading directory contents: ${dirPath}`);
       const files = await readdir(dirPath);
-      Logger.info(`Found ${files.length} files/directories`);
+      Logger.debug(`Read ${files.length} entries from ${dirPath}`);
       return files;
     } catch (error) {
       Logger.error(`Error reading directory ${dirPath}:`, error);
@@ -72,9 +73,8 @@ export class FileSystemUtils {
    */
   static async unlink(filePath) {
     try {
-      Logger.info(`Deleting file: ${filePath}`);
       await fs.promises.unlink(filePath);
-      Logger.info(`File deleted successfully: ${filePath}`);
+      Logger.debug(`Deleted file: ${filePath}`);
     } catch (error) {
       Logger.error(`Error deleting file ${filePath}:`, error);
       throw error;

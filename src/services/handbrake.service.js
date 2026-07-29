@@ -659,7 +659,8 @@ export class HandBrakeService {
       const compressionRatio = ((1 - outputStats.size / inputStats.size) * 100).toFixed(1);
       const processingSpeed = (fileSizeGB / (conversionTimeMs / 1000 / 60 / 60)).toFixed(2); // GB/hour
 
-      Logger.info(`HandBrake conversion completed successfully: ${path.basename(outputPath)}`);      Logger.debug(`Conversion metrics:`);
+      Logger.info(`HandBrake conversion completed successfully: ${path.basename(outputPath)}`);
+      Logger.debug(`Conversion metrics:`);
       Logger.debug(`  - Duration: ${conversionTimeMin} minutes`);
       Logger.debug(`  - Original size: ${inputSizeMB.toFixed(2)} MB`);
       Logger.debug(`  - Compressed size: ${outputSizeMB} MB`);
