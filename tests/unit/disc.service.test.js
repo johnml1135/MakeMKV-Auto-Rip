@@ -127,6 +127,46 @@ describe("DiscService", () => {
       expect(detectSpy).toHaveBeenCalled();
     });
 
+    it("getAvailableDiscs should not list a drive twice when polling re-reports it", async () => {
+      vi.resetModules();
+      vi.doMock("../../src/utils/makemkv-messages.js", () => ({
+        MakeMKVMessages: { checkOutput: () => true },
+      }));
+      vi.doMock("../../src/config/index.js", () => ({
+        AppConfig: {
+          ...mockAppConfig,
+          mountWaitTimeout: 5,
+          mountPollInterval: 1,
+        },
+      }));
+      vi.doMock("../../src/services/drive.service.js", () => ({
+        DriveService: {
+          getDriveMountStatus: vi
+            .fn()
+            .mockResolvedValue({ total: 2, mounted: 1, unmounted: 1 }),
+        },
+      }));
+
+      const { DiscService: Local } = await import(
+        "../../src/services/disc.service.js"
+      );
+      vi.spyOn(Local, "sleep").mockResolvedValue();
+
+      // The mount poll re-reports the disc the initial detection already found.
+      // Ripping it twice would run two MakeMKV jobs against the one drive.
+      const disc0 = { driveNumber: "0", title: "First", mediaType: "dvd" };
+      vi.spyOn(Local, "detectAvailableDiscs").mockResolvedValueOnce([disc0]);
+      vi.spyOn(Local, "waitForDriveMount").mockResolvedValue([{ ...disc0 }]);
+      vi.spyOn(Local, "getCompleteDiscInfo").mockImplementation(async (discs) =>
+        discs.map((disc) => ({ ...disc, fileNumber: "0" }))
+      );
+
+      const result = await Local.getAvailableDiscs();
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({ driveNumber: "0", title: "First" });
+    });
+
     it("getAvailableDiscs should log when drives exist but no media is mounted", async () => {
       vi.resetModules();
       vi.doMock("../../src/config/index.js", () => ({

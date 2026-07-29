@@ -26,7 +26,9 @@ let operationStatus = "idle"; // idle, loading, ejecting, ripping
 let currentOperationPromise = null;
 let currentStopRequested = false;
 let activeWebLoggerSinkCleanup = null;
-let currentRipService = null;
+// One RipService for the whole rip-mode session, so its HandBrake queue can
+// keep encoding across disc changes instead of being thrown away each cycle.
+let ripSession = null;
 let ripModeEnabled = false;
 let ripModeLoop = null;
 
@@ -107,9 +109,22 @@ async function runTrackedOperation(operation) {
   }
 }
 
+function ensureRipSession() {
+  if (!ripSession) {
+    ripSession = new RipService({
+      exitOnCriticalError: false,
+      // Encode in the background: the disc is ejected as soon as it is ripped,
+      // so waiting for HandBrake here would leave the drive idle (and the loop
+      // blind to disc changes) for the length of an encode.
+      backgroundHandBrake: true,
+    });
+  }
+
+  return ripSession;
+}
+
 async function executeRipCycle() {
-  const ripService = new RipService({ exitOnCriticalError: false });
-  currentRipService = ripService;
+  const ripService = ensureRipSession();
 
   try {
     await prepareRipRuntime();
@@ -127,8 +142,6 @@ async function executeRipCycle() {
 
     Logger.error("Rip cycle failed", error.message);
     return { success: false, error: error.message };
-  } finally {
-    currentRipService = null;
   }
 }
 
@@ -140,22 +153,91 @@ function getRipPollIntervalMs() {
   return Math.max(AppConfig.mountPollInterval * 1000, 1000);
 }
 
+/**
+ * Stable identity of a detected disc: the drive holding it plus its volume
+ * label. Used to tell "the disc I just ripped is still sitting there" apart
+ * from "a new disc has been loaded".
+ */
+function discKey(disc) {
+  return `${disc.driveNumber}:${disc.title}`;
+}
+
+function describeDiscs(discs) {
+  return discs.map((disc) => disc.title).join(", ");
+}
+
+/**
+ * Poll the drives once.
+ * @returns {Promise<Array|null>} Detected discs, or null when the detection
+ *   itself failed - which must not be read as "the drives are empty", or a
+ *   single hiccup would make the loop re-rip the disc that is still loaded.
+ */
 async function detectDiscsForRipMode() {
   try {
     return await DiscService.detectAvailableDiscs();
   } catch (error) {
     Logger.error("Rip mode disc detection failed", error.message);
-    return [];
+    return null;
   }
 }
 
-async function waitForDiscPresence(hasDisc, waitingMessage) {
-  while (ripModeEnabled) {
-    setOperationState("ripping", waitingMessage);
+function describeBackgroundEncoding() {
+  const status = ripSession?.getHandBrakeStatus();
+  if (!status?.total) {
+    return "";
+  }
 
+  return ` (encoding ${status.active ?? "queued files"}${
+    status.pending ? ` +${status.pending} queued` : ""
+  } in the background)`;
+}
+
+/**
+ * Wait until a disc is loaded that we have not just ripped.
+ *
+ * A disc counts as new when either the drives have been seen empty since the
+ * last rip (the normal eject then swap), or its identity differs from what we
+ * ripped last (a swap made while we were busy ripping and not polling). Both
+ * rules are needed: waiting for "empty" alone hangs forever when the user
+ * swaps discs during a rip, and comparing identity alone would ignore a
+ * genuinely new disc that happens to share a volume label.
+ *
+ * @param {Set<string>} rippedKeys - Identities from the previous cycle. Cleared
+ *   in place once the drives are observed empty.
+ * @returns {Promise<Array>} Discs present when one of them is new; empty when
+ *   rip mode was stopped.
+ */
+async function waitForNextDiscs(rippedKeys) {
+  let lastAnnounced = null;
+
+  const announce = (message) => {
+    if (message !== lastAnnounced) {
+      lastAnnounced = message;
+      broadcastLogMessage("info", message);
+    }
+
+    setOperationState("ripping", `${message}${describeBackgroundEncoding()}`);
+  };
+
+  while (ripModeEnabled) {
     const detectedDiscs = await detectDiscsForRipMode();
-    if ((detectedDiscs.length > 0) === hasDisc) {
+
+    if (!ripModeEnabled) {
+      break;
+    }
+
+    if (detectedDiscs === null) {
+      announce("Disc detection failed. Retrying...");
+    } else if (detectedDiscs.length === 0) {
+      // Drives are empty, so whatever is loaded next is a new disc.
+      rippedKeys.clear();
+      announce("Waiting for disc insertion...");
+    } else if (detectedDiscs.some((disc) => !rippedKeys.has(discKey(disc)))) {
       return detectedDiscs;
+    } else {
+      announce(
+        `${describeDiscs(detectedDiscs)} was already ripped. Waiting for the disc to be removed or swapped...`
+      );
     }
 
     await wait(getRipPollIntervalMs());
@@ -165,25 +247,32 @@ async function waitForDiscPresence(hasDisc, waitingMessage) {
 }
 
 async function runRipModeLoop() {
+  // Identities of the discs ripped by the previous cycle.
+  const rippedKeys = new Set();
+
   broadcastLogMessage(
     "info",
     "Rip mode enabled. Waiting for inserted discs..."
   );
 
   while (ripModeEnabled) {
-    const detectedDiscs = await waitForDiscPresence(
-      true,
-      "Waiting for disc insertion..."
-    );
+    const detectedDiscs = await waitForNextDiscs(rippedKeys);
 
-    if (!ripModeEnabled) {
+    if (!ripModeEnabled || detectedDiscs.length === 0) {
       break;
     }
 
     setOperationState(
       "ripping",
-      `Detected ${detectedDiscs.length} disc(s). Starting rip process...`
+      `Detected ${detectedDiscs.length} disc(s): ${describeDiscs(detectedDiscs)}. Starting rip process...`
     );
+
+    // Record the discs before ripping: they are ejected partway through the
+    // cycle, so this is the last point at which they can be identified.
+    rippedKeys.clear();
+    for (const disc of detectedDiscs) {
+      rippedKeys.add(discKey(disc));
+    }
 
     const result = await executeRipCycle();
 
@@ -194,7 +283,7 @@ async function runRipModeLoop() {
     if (result.success) {
       broadcastLogMessage(
         "success",
-        "Rip cycle completed successfully. Waiting for the next disc..."
+        "Rip cycle completed successfully. Insert the next disc and close the drive to keep ripping."
       );
     } else {
       broadcastLogMessage(
@@ -202,8 +291,6 @@ async function runRipModeLoop() {
         `Rip cycle failed${result.error ? `: ${result.error}` : ""}`
       );
     }
-
-    await waitForDiscPresence(false, "Waiting for current disc to be removed...");
   }
 }
 
@@ -222,6 +309,15 @@ function ensureRipModeLoop() {
       broadcastLogMessage("error", `Rip mode failed: ${error.message}`);
     } finally {
       ripModeLoop = null;
+
+      // Background encoding belongs to the session, so it ends with it.
+      const finishedSession = ripSession;
+      ripSession = null;
+      if (finishedSession) {
+        finishedSession.requestCancel();
+        await finishedSession.waitForHandBrakeQueue().catch(() => {});
+      }
+
       detachWebLoggerSink();
 
       if (!ripModeEnabled) {
@@ -237,8 +333,12 @@ function stopCurrentOperation(message) {
   ripModeEnabled = false;
   currentStopRequested = true;
 
+  // Cancels the in-flight rip and any background encode. Safe to call while the
+  // loop is only waiting for a disc: it just marks the session cancelled.
+  const encoding = ripSession?.getHandBrakeStatus();
+  ripSession?.requestCancel();
+
   if (currentOperationPromise) {
-    currentRipService?.requestCancel();
     setOperationState(operationStatus, "Cancelling current operation...");
   } else {
     detachWebLoggerSink();
@@ -246,6 +346,13 @@ function stopCurrentOperation(message) {
   }
 
   broadcastLogMessage("warn", message);
+
+  if (encoding?.total) {
+    broadcastLogMessage(
+      "warn",
+      `Cancelled ${encoding.total} in-progress/queued HandBrake encode(s). The ripped MKV files were kept.`
+    );
+  }
 }
 
 /**
@@ -660,6 +767,15 @@ router.post("/rip/start", async (req, res) => {
       return res
         .status(409)
         .json({ error: "Another operation is in progress" });
+    }
+
+    // The status goes idle the moment a stop is requested, but the loop needs a
+    // poll interval to unwind. Starting again before then would hand the new
+    // session to the old loop as it shuts down.
+    if (ripModeLoop) {
+      return res
+        .status(409)
+        .json({ error: "Rip mode is still stopping, please try again" });
     }
 
     ripModeEnabled = true;

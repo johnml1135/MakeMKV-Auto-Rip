@@ -192,7 +192,7 @@ describe("Application End-to-End Tests", () => {
       vi.resetModules();
 
       // Mock child_process exec before importing services
-      const mockExec = vi.fn((command, callback) => {
+      const mockExec = vi.fn((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           // Mock drive info response with at least one drive
           const mockOutput = `DRV:0,2,999,1,"BD-ROM HL-DT-ST BD-RE  BH16NS40 1.02d","Test Movie Title","/dev/sr0"`;
@@ -308,7 +308,7 @@ TINFO:1,9,0,"0:45:12"`;
 
       // Mock child_process
       vi.doMock("child_process", () => ({
-        exec: vi.fn((command, callback) => {
+        exec: vi.fn((command, options, callback = options) => {
           setTimeout(
             () => callback(null, 'MSG:5036,0,1,"Copy complete."', ""),
             0

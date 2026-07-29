@@ -17,15 +17,26 @@ import { MakeMKVMessages } from "../utils/makemkv-messages.js";
  * Service for handling DVD/Blu-ray ripping operations
  */
 export class RipService {
+  /**
+   * @param {Object} [options]
+   * @param {boolean} [options.exitOnCriticalError=true] - Exit the process on a
+   *   critical failure (CLI behaviour) instead of rethrowing to the caller.
+   * @param {boolean} [options.backgroundHandBrake=false] - Let HandBrake keep
+   *   encoding after `startRipping()` resolves instead of blocking on the queue.
+   *   Used by rip mode so the next disc can be ripped while the previous one is
+   *   still encoding.
+   */
   constructor(options = {}) {
     this.goodVideoArray = [];
     this.badVideoArray = [];
     this.goodHandBrakeArray = [];
     this.badHandBrakeArray = [];
     this.pendingHandBrakeJobs = [];
+    this.activeHandBrakeJob = null;
     this.handbrakeWorkerPromise = null;
     this.handbrakeWorkerError = null;
     this.exitOnCriticalError = options.exitOnCriticalError !== false;
+    this.backgroundHandBrake = options.backgroundHandBrake === true;
     this.cancelRequested = false;
     this.runCancelled = false;
     this.activeRipProcesses = new Set();
@@ -35,10 +46,17 @@ export class RipService {
   prepareForRun() {
     this.cancelRequested = false;
     this.runCancelled = false;
-    this.pendingHandBrakeJobs = [];
-    this.handbrakeWorkerPromise = null;
-    this.handbrakeWorkerError = null;
-    this.activeRipProcesses = new Set();
+
+    // The HandBrake queue and worker are deliberately NOT reset here: the encode
+    // queue outlives the rip cycle that filled it (see `backgroundHandBrake`),
+    // and dropping the worker handle while a worker is still alive would let a
+    // second worker start alongside it. A completed or cancelled run already
+    // leaves the queue empty. Likewise activeRipProcesses, whose entries remove
+    // themselves when their process closes.
+    // A pending error only gets cleared when nobody can still be waiting on it.
+    if (!this.backgroundHandBrake) {
+      this.handbrakeWorkerError = null;
+    }
 
     if (this.abortController.signal.aborted) {
       this.abortController = new AbortController();
@@ -152,6 +170,24 @@ export class RipService {
   }
 
   /**
+   * Work out where MakeMKV actually wrote the titles.
+   * `ripDir` (the folder we created and handed to MakeMKV) is authoritative and
+   * absolute; the path parsed out of the log is only used as a fallback, and is
+   * resolved because MakeMKV echoes it back relative when it was given one.
+   * @param {string} stdout - MakeMKV output
+   * @param {string} [ripDir] - Folder passed to MakeMKV for this rip
+   * @returns {string|null}
+   */
+  resolveOutputFolder(stdout, ripDir) {
+    if (ripDir) {
+      return ripDir;
+    }
+
+    const parsed = this.extractOutputFolder(stdout);
+    return parsed ? path.resolve(parsed) : null;
+  }
+
+  /**
    * Start the ripping process for all available discs
    * @returns {Promise<void>}
    */
@@ -190,6 +226,16 @@ export class RipService {
         this.throwIfCancelled("Ripping cancelled");
         await this.handlePostRipActions();
         this.throwIfCancelled("Ripping cancelled");
+
+        if (this.backgroundHandBrake) {
+          // Hand the encode queue off to the background worker and return: the
+          // discs are already ejected, so the drive is free for the next one
+          // while HandBrake keeps working.
+          this.startHandBrakeWorker();
+          this.displayResults({ includeHandBrake: false });
+          return;
+        }
+
         await this.processHandBrakeQueue();
         this.throwIfCancelled("Ripping cancelled");
         this.displayResults();
@@ -301,7 +347,9 @@ export class RipService {
         let childProcess;
         let cleanupProcess = () => {};
 
-        childProcess = exec(makeMKVCommand, async (err, stdout, stderr) => {
+        // A long disc can emit more than exec's default 1 MB of output, and
+        // exceeding maxBuffer kills makemkvcon mid-rip - hence the generous cap.
+        childProcess = exec(makeMKVCommand, { maxBuffer: 1024 * 1024 * 64 }, async (err, stdout, stderr) => {
           cleanupProcess();
 
           if (this.cancelRequested) {
@@ -362,7 +410,7 @@ export class RipService {
           }
 
           try {
-            await this.handleRipCompletion(stdout, commandDataItem);
+            await this.handleRipCompletion(stdout, commandDataItem, dir);
             await this.attemptReadErrorRecovery(stdout, commandDataItem, dir);
             await this.ejectCompletedDisc(commandDataItem);
             resolve(commandDataItem.title);
@@ -382,9 +430,10 @@ export class RipService {
    * Handle post-rip completion tasks (logging, validation)
    * @param {string} stdout - MakeMKV output
    * @param {Object} commandDataItem - Disc information object
+   * @param {string} [ripDir] - Folder this disc was ripped into
    * @returns {Promise<void>}
    */
-  async handleRipCompletion(stdout, commandDataItem) {
+  async handleRipCompletion(stdout, commandDataItem, ripDir) {
     if (AppConfig.isFileLogEnabled) {
       const fileName = FileSystemUtils.createUniqueLogFile(
         AppConfig.logDir,
@@ -401,22 +450,13 @@ export class RipService {
       }
     }
 
-    // Debug: Log MakeMKV output lines containing MSG: or completion-related terms
-    Logger.info("Analyzing MakeMKV output for completion status...");
-    const relevantLines = stdout.split('\n')
-      .filter(line => line.includes('MSG:') ||
-        line.toLowerCase().includes('copy') ||
-        line.toLowerCase().includes('complete') ||
-        line.toLowerCase().includes('progress'))
-      .map(line => line.trim());
-
-    if (relevantLines.length > 0) {
-      Logger.info("Found relevant MakeMKV output lines:");
-      relevantLines.forEach(line => Logger.info(`- ${line}`));
-    }
+    // Verbose mode only: the raw MakeMKV messages behind the completion verdict.
+    stdout
+      .split("\n")
+      .filter((line) => line.includes("MSG:"))
+      .forEach((line) => Logger.debug(`[makemkv] ${line.trim()}`));
 
     const success = this.checkCopyCompletion(stdout, commandDataItem);
-    Logger.info(`Rip completion check result: ${success ? 'successful' : 'failed'}`);
 
     if (success && this.cancelRequested) {
       Logger.info("Cancellation requested, skipping HandBrake queueing for completed rip.");
@@ -425,11 +465,9 @@ export class RipService {
     }
 
     // If rip was successful and HandBrake is enabled, queue the file for the encode phase
-    Logger.info(`HandBrake enabled status: ${AppConfig.isHandBrakeEnabled ? 'enabled' : 'disabled'}`);
     if (success && AppConfig.isHandBrakeEnabled) {
       try {
-        Logger.info("Queueing HandBrake post-processing workflow for after ripping...");
-        const outputFolder = this.extractOutputFolder(stdout);
+        const outputFolder = this.resolveOutputFolder(stdout, ripDir);
 
         if (!outputFolder) {
           Logger.error("Failed to parse output directory from MakeMKV log");
@@ -438,16 +476,12 @@ export class RipService {
           throw new Error("Could not find output folder in MakeMKV log");
         }
 
-        Logger.info(`Scanning for MKV files in: ${outputFolder}`);
-
         // Verify the output folder exists
         if (!fs.existsSync(outputFolder)) {
           throw new Error(`Output folder does not exist: ${outputFolder}`);
         }
 
         const outputEntries = await FileSystemUtils.readdir(outputFolder);
-        Logger.info(`Found ${outputEntries.length} files in output folder`);
-
         const mkvFiles = outputEntries.filter(file => file.toLowerCase().endsWith(".mkv"));
         if (mkvFiles.length === 0) {
           Logger.warning(`No MKV files found in output folder: ${outputFolder}`);
@@ -524,9 +558,9 @@ export class RipService {
       return;
     }
 
-    // Prefer the folder MakeMKV reported; fall back to the dir we created for the
-    // rip (a whole-disc abort may never log the "Saving into directory" line).
-    const outputFolder = this.extractOutputFolder(stdout) || knownOutputDir;
+    // Prefer the dir we created for the rip: a whole-disc abort may never log a
+    // "Saving into directory" line to parse.
+    const outputFolder = this.resolveOutputFolder(stdout, knownOutputDir);
     if (!outputFolder || !fs.existsSync(outputFolder)) {
       Logger.error(
         "Read-error recovery: could not determine the MakeMKV output folder. Skipping recovery."
@@ -1005,6 +1039,7 @@ export class RipService {
     while (this.pendingHandBrakeJobs.length > 0) {
       this.throwIfCancelled("HandBrake processing cancelled");
       const job = this.pendingHandBrakeJobs.shift();
+      this.activeHandBrakeJob = job;
 
       try {
         Logger.info(`Processing queued MKV file with HandBrake: ${job.file}`);
@@ -1031,7 +1066,38 @@ export class RipService {
         if (error.details) {
           Logger.error("Error details:", error.details);
         }
+      } finally {
+        this.activeHandBrakeJob = null;
       }
+    }
+  }
+
+  /**
+   * Snapshot of the encode pipeline, for status reporting while ripping
+   * continues in parallel.
+   * @returns {{active: string|null, pending: number, total: number}}
+   */
+  getHandBrakeStatus() {
+    const active = this.activeHandBrakeJob?.file ?? null;
+    const pending = this.pendingHandBrakeJobs.length;
+
+    return { active, pending, total: pending + (active ? 1 : 0) };
+  }
+
+  /**
+   * Wait for background HandBrake work to drain, without starting a worker or
+   * reporting an empty queue. A worker error is rethrown once, then cleared.
+   * @returns {Promise<void>}
+   */
+  async waitForHandBrakeQueue() {
+    while (this.handbrakeWorkerPromise) {
+      await this.handbrakeWorkerPromise;
+    }
+
+    if (this.handbrakeWorkerError) {
+      const error = this.handbrakeWorkerError;
+      this.handbrakeWorkerError = null;
+      throw error;
     }
   }
 
@@ -1052,16 +1118,7 @@ export class RipService {
     }
 
     this.startHandBrakeWorker();
-
-    while (this.handbrakeWorkerPromise) {
-      await this.handbrakeWorkerPromise;
-    }
-
-    if (this.handbrakeWorkerError) {
-      const error = this.handbrakeWorkerError;
-      this.handbrakeWorkerError = null;
-      throw error;
-    }
+    await this.waitForHandBrakeQueue();
   }
 
   /**
@@ -1086,8 +1143,12 @@ export class RipService {
 
   /**
    * Display the results of the ripping process
+   * @param {Object} [options]
+   * @param {boolean} [options.includeHandBrake=true] - Report and reset the
+   *   HandBrake results too. Off while encoding runs in the background, where
+   *   those results are not in yet and must survive into the next rip cycle.
    */
-  displayResults() {
+  displayResults({ includeHandBrake = true } = {}) {
     if (this.goodVideoArray.length > 0) {
       Logger.info(
         "The following DVD/Blu-ray titles have been successfully ripped: ",
@@ -1100,6 +1161,14 @@ export class RipService {
         "The following DVD/Blu-ray titles failed to rip: ",
         this.badVideoArray.join(", ")
       );
+    }
+
+    // Reset arrays for next run
+    this.goodVideoArray = [];
+    this.badVideoArray = [];
+
+    if (!includeHandBrake) {
+      return;
     }
 
     // Display HandBrake results if HandBrake was enabled
@@ -1119,14 +1188,8 @@ export class RipService {
       }
     }
 
-    // Reset arrays for next run
-    this.goodVideoArray = [];
-    this.badVideoArray = [];
     this.goodHandBrakeArray = [];
     this.badHandBrakeArray = [];
-    this.pendingHandBrakeJobs = [];
-    this.handbrakeWorkerPromise = null;
-    this.handbrakeWorkerError = null;
   }
 
   /**

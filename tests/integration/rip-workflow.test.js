@@ -66,7 +66,7 @@ TINFO:2,9,0,"2:15:30"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete. 1 titles saved."
 Additional MakeMKV output here`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           callback(null, mockDriveData, "");
         } else if (command.includes("info disc:")) {
@@ -117,10 +117,12 @@ Additional MakeMKV output here`;
       // Should have called mkv for each disc to perform ripping
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:0"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:1"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
 
@@ -147,7 +149,7 @@ Additional MakeMKV output here`;
       const mockFileData = `TINFO:0,9,0,"1:45:30"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete. 1 titles saved."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           callback(null, mockDriveData, "");
         } else if (command.includes("info disc:0")) {
@@ -170,6 +172,7 @@ Additional MakeMKV output here`;
       );
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:0"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
       expect(DriveService.ejectDriveByNumber).toHaveBeenCalledWith("0");
@@ -178,7 +181,7 @@ Additional MakeMKV output here`;
 
   describe("Error handling in workflow", () => {
     it("should handle disc detection failure", async () => {
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           // Call callback immediately to prevent timeout
           setImmediate(() => callback(null, "", "No drives found"));
@@ -204,7 +207,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
 
       const mockFileData = `TINFO:0,9,0,"1:30:00"`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:")) {
@@ -236,10 +239,12 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       // Verify both ripping attempts were made
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:0"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:1"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
 
@@ -250,7 +255,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
 
     it("should handle critical MakeMKV errors", async () => {
       // Mock a critical MakeMKV error that would normally cause process.exit
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           // Call callback immediately to prevent timeout
           setImmediate(() => callback(new Error("MakeMKV not found"), "", ""));
@@ -281,7 +286,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       const mockFileData = `TINFO:0,9,0,"1:30:00"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:0")) {
@@ -311,7 +316,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       const mockDriveData = `DRV:0,2,999,1,"BD-ROM","Test Movie","/dev/sr0"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:0")) {
@@ -328,6 +333,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       // Verify rip was attempted
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:0"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
     });
@@ -352,7 +358,7 @@ DRV:1,2,999,1,"DVD","Test Movie","/dev/sr1"`;
       const mockFileData = `TINFO:0,9,0,"1:30:00"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:")) {
@@ -390,7 +396,7 @@ DRV:1,2,999,1,"DVD","Test Movie","/dev/sr1"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete. 1 titles saved."
 Full MakeMKV log output here`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:0")) {
@@ -432,7 +438,7 @@ DRV:2,2,999,1,"BD-ROM","Movie 3","/dev/sr2"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
       let ripCount = 0;
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:")) {
@@ -480,7 +486,7 @@ DRV:2,2,999,1,"BD-ROM","Movie 3","/dev/sr2"`;
 
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           callback(null, mockDriveData, "");
         } else if (command.includes("info disc:0")) {
@@ -495,6 +501,7 @@ DRV:2,2,999,1,"BD-ROM","Movie 3","/dev/sr2"`;
       // Should handle many titles and select the longest one
       expect(exec).toHaveBeenCalledWith(
         expect.stringMatching(/mkv disc:0 \d+/),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
     });
@@ -528,7 +535,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       const mockFileData = `TINFO:0,9,0,"1:30:00"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:")) {
@@ -546,10 +553,12 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       // Should have processed both discs
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:0"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:1"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
     });
@@ -581,7 +590,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       const mockFileData = `TINFO:0,9,0,"1:30:00"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:")) {
@@ -599,6 +608,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       // Should still process the disc that was detected
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:0"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
     });
@@ -626,7 +636,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
         unmounted: 0,
       });
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         setImmediate(() => callback(null, 'DRV:0,0,999,0,"","",""', ""));
       });
 
@@ -638,6 +648,7 @@ DRV:1,2,999,1,"DVD","Movie 2","/dev/sr1"`;
       // Should not have called any ripping commands
       expect(exec).not.toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
     });
@@ -671,7 +682,7 @@ DRV:1,256,999,1,"Virtual Drive","Virtual","/dev/sr1"`; // Virtual drive should b
       const mockFileData = `TINFO:0,9,0,"1:30:00"`;
       const mockRipOutput = `MSG:5036,0,1,"Copy complete."`;
 
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         if (command.includes("info disc:index")) {
           setImmediate(() => callback(null, mockDriveData, ""));
         } else if (command.includes("info disc:")) {
@@ -689,10 +700,12 @@ DRV:1,256,999,1,"Virtual Drive","Virtual","/dev/sr1"`; // Virtual drive should b
       // Should only process the real drive (not the virtual one)
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:0"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
       expect(exec).not.toHaveBeenCalledWith(
         expect.stringContaining("mkv disc:1"),
+        expect.objectContaining({ maxBuffer: expect.any(Number) }),
         expect.any(Function)
       );
     });

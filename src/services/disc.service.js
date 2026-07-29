@@ -41,7 +41,10 @@ export class DiscService {
 
             // Merge any newly detected discs with existing ones
             if (additionalDiscs.length > 0) {
-              detectedDiscs = [...detectedDiscs, ...additionalDiscs];
+              detectedDiscs = this.mergeDiscsByDrive(
+                detectedDiscs,
+                additionalDiscs
+              );
               Logger.info(
                 `Total discs found after waiting: ${detectedDiscs.length}`
               );
@@ -72,6 +75,27 @@ export class DiscService {
         reject(error);
       }
     });
+  }
+
+  /**
+   * Combine disc lists, keeping one entry per drive (the latest observation).
+   *
+   * A drive holds exactly one disc, so a repeated drive number always means the
+   * same disc was reported twice - which used to happen when a poll during
+   * mount detection re-reported a disc the initial detection had already found.
+   * Ripping that duplicate ran two MakeMKV jobs against one drive at the same
+   * time, thrashing it and producing a spurious "-1" copy of the title.
+   * @param {...Array<Object>} discLists - Disc lists in observation order
+   * @returns {Array<Object>} - Discs, unique by drive number
+   */
+  static mergeDiscsByDrive(...discLists) {
+    const byDrive = new Map();
+
+    for (const disc of discLists.flat()) {
+      byDrive.set(String(disc.driveNumber), disc);
+    }
+
+    return [...byDrive.values()];
   }
 
   /**

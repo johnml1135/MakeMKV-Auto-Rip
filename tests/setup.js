@@ -26,7 +26,7 @@ vi.mock("child_process", async () => {
   const actual = await vi.importActual("child_process");
   return {
     ...actual,
-    exec: vi.fn((command, callback) => {
+    exec: vi.fn((command, options, callback = options) => {
       // Mock different MakeMKV command responses
       if (command.includes("info disc:index")) {
         // Mock drive info response

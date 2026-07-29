@@ -35,7 +35,7 @@ const mockAppConfig = {
 vi.mock("../../src/config/index.js", () => mockAppConfig);
 
 vi.mock("../../src/utils/logger.js", () => ({
-  Logger: { info: vi.fn(), warning: vi.fn(), error: vi.fn(), separator: vi.fn() },
+  Logger: { info: vi.fn(), debug: vi.fn(), warning: vi.fn(), error: vi.fn(), separator: vi.fn() },
 }));
 
 // FileSystemUtils.readdir returns staged listings (one per call).

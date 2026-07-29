@@ -65,6 +65,12 @@ class MockRipService {
   isCancellationError() {
     return false;
   }
+
+  getHandBrakeStatus() {
+    return { active: null, pending: 0, total: 0 };
+  }
+
+  async waitForHandBrakeQueue() {}
 }
 
 vi.mock("../../src/services/rip.service.js", () => ({
@@ -154,12 +160,15 @@ describe("api routes rip mode", () => {
     await Promise.resolve();
 
     expect(prepareRipRuntimeMock).toHaveBeenCalledTimes(1);
-    expect(ripServiceCtorMock).toHaveBeenCalledWith({ exitOnCriticalError: false });
+    expect(ripServiceCtorMock).toHaveBeenCalledWith({
+      exitOnCriticalError: false,
+      backgroundHandBrake: true,
+    });
 
     await vi.waitFor(() => {
       expect(broadcastLogMessageMock).toHaveBeenCalledWith(
         "success",
-        "Rip cycle completed successfully. Waiting for the next disc..."
+        expect.stringContaining("Rip cycle completed successfully")
       );
     });
 
@@ -169,8 +178,77 @@ describe("api routes rip mode", () => {
     expect(statusRes.payload.status).toBe("ripping");
     expect(statusRes.payload.canStop).toBe(true);
     expect(statusRes.payload.operation).toMatch(
-      /Waiting for (current disc to be removed|disc insertion)\.\.\./
+      /Waiting for disc insertion\.\.\.|was already ripped/
     );
+
+    await stopHandler({}, createResponse());
+  });
+
+  it("rips a disc that was swapped in while the previous rip was running", async () => {
+    // The drives are never observed empty: the user swapped discs while the
+    // first rip (and its background encode) had detection paused.
+    prepareRipRuntimeMock.mockResolvedValue(undefined);
+    startRippingMock.mockResolvedValue(undefined);
+    detectAvailableDiscsMock
+      .mockResolvedValueOnce([{ title: "MovieA", driveNumber: 0 }])
+      .mockResolvedValue([{ title: "MovieB", driveNumber: 0 }]);
+
+    await startRipHandler({}, createResponse());
+
+    await vi.waitFor(() => {
+      expect(startRippingMock).toHaveBeenCalledTimes(2);
+    });
+
+    // One session serves both cycles, so its encode queue survives the swap.
+    expect(ripServiceCtorMock).toHaveBeenCalledTimes(1);
+
+    await stopHandler({}, createResponse());
+  });
+
+  it("waits instead of re-ripping a disc that is still loaded", async () => {
+    prepareRipRuntimeMock.mockResolvedValue(undefined);
+    startRippingMock.mockResolvedValue(undefined);
+    detectAvailableDiscsMock.mockResolvedValue([
+      { title: "MovieA", driveNumber: 0 },
+    ]);
+
+    await startRipHandler({}, createResponse());
+
+    await vi.waitFor(() => {
+      expect(startRippingMock).toHaveBeenCalledTimes(1);
+    });
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(startRippingMock).toHaveBeenCalledTimes(1);
+
+    const statusRes = createResponse();
+    await statusHandler({}, statusRes);
+    expect(statusRes.payload.operation).toContain("was already ripped");
+
+    await stopHandler({}, createResponse());
+  });
+
+  it("does not treat a failed detection as an empty drive", async () => {
+    prepareRipRuntimeMock.mockResolvedValue(undefined);
+    startRippingMock.mockResolvedValue(undefined);
+    detectAvailableDiscsMock
+      .mockResolvedValueOnce([{ title: "MovieA", driveNumber: 0 }])
+      .mockRejectedValueOnce(new Error("MakeMKV busy"))
+      .mockResolvedValue([{ title: "MovieA", driveNumber: 0 }]);
+
+    await startRipHandler({}, createResponse());
+
+    await vi.waitFor(() => {
+      expect(startRippingMock).toHaveBeenCalledTimes(1);
+    });
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // A detection hiccup must not look like the disc was removed and reloaded.
+    expect(startRippingMock).toHaveBeenCalledTimes(1);
+
+    await stopHandler({}, createResponse());
   });
 
   it("can stop rip mode while waiting for a new disc", async () => {

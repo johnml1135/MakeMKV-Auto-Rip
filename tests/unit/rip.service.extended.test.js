@@ -22,6 +22,7 @@ vi.mock("../../src/config/index.js", () => ({
 vi.mock("../../src/utils/logger.js", () => ({
   Logger: {
     info: vi.fn(),
+    debug: vi.fn(),
     error: vi.fn(),
     warning: vi.fn(),
     separator: vi.fn(),
@@ -240,7 +241,7 @@ describe("RipService - Extended Coverage", () => {
       };
 
       let execCallback;
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         execCallback = callback;
         return fakeChildProcess;
       });
@@ -279,7 +280,7 @@ describe("RipService - Extended Coverage", () => {
       await ripService.handleRipCompletion(mockStdout, mockDisc);
 
       expect(Logger.info).toHaveBeenCalledWith(
-        expect.stringContaining("HandBrake post-processing workflow")
+        expect.stringContaining("Queued MKV file for HandBrake processing")
       );
       await vi.waitFor(() => {
         expect(HandBrakeService.convertFile).toHaveBeenCalledWith(

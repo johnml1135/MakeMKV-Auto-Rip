@@ -50,6 +50,7 @@ vi.mock("../../src/services/drive.service.js", () => ({
 vi.mock("../../src/utils/logger.js", () => ({
   Logger: {
     info: vi.fn(),
+    debug: vi.fn(),
     error: vi.fn(),
     separator: vi.fn(),
   },
@@ -74,7 +75,7 @@ vi.mock("../../src/services/handbrake.service.js", () => ({
 }));
 
 vi.mock("child_process", () => ({
-  exec: vi.fn((command, callback) => {
+  exec: vi.fn((command, options, callback = options) => {
     // Mock successful execution with small delay to simulate async
     setTimeout(() => {
       callback(null, "Mock MakeMKV output MSG:5036", "");
@@ -214,7 +215,7 @@ describe("RipService", () => {
     it("should handle ripping errors gracefully without crashing", async () => {
       // Mock exec to simulate ripping failure
       const { exec } = await import("child_process");
-      exec.mockImplementation((command, callback) => {
+      exec.mockImplementation((command, options, callback = options) => {
         setTimeout(() => {
           callback(new Error("Ripping failed"), "", "");
         }, 10);
