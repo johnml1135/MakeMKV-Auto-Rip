@@ -13,12 +13,12 @@ vi.mock("../../src/utils/logger.js", () => ({
   Logger: { info: vi.fn(), debug: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 
-const {
-  RecoveryService,
-  RecoveryProgressTracker,
-  formatBytes,
-  formatDuration,
-} = await import("../../src/services/recovery.service.js");
+const { RecoveryService, RecoveryProgressTracker } = await import(
+  "../../src/services/recovery.service.js"
+);
+const { formatBytes, formatDuration } = await import(
+  "../../src/utils/format.js"
+);
 
 /** A status block exactly as ddrescue 1.28 draws it (with cursor escapes). */
 function statusBlock({
@@ -92,30 +92,52 @@ describe("parseDdrescueStatus", () => {
 describe("RecoveryProgressTracker", () => {
   function trackerAt(clock, options = {}) {
     return new RecoveryProgressTracker({
-      intervalMs: 60_000,
       budgetSec: 1200,
       now: () => clock.ms,
       ...options,
     });
   }
 
-  it("reports the first sample, then only once per interval", () => {
+  it("describes itself before any status has arrived", () => {
     const clock = { ms: 0 };
     const tracker = trackerAt(clock);
 
-    expect(tracker.update(RecoveryService.parseDdrescueStatus(statusBlock()))).toContain(
-      "44.65% of the disc read"
+    clock.ms = 30_000;
+    expect(tracker.summary()).toBe(
+      "Recovering: waiting for the first ddrescue status - 30s elapsed"
+    );
+  });
+
+  it("flags a stall when the recovered total stops moving", () => {
+    const clock = { ms: 0 };
+    const tracker = trackerAt(clock);
+
+    tracker.update(RecoveryService.parseDdrescueStatus(statusBlock()));
+    expect(tracker.summary()).not.toContain("no new data");
+
+    // Two minutes of identical samples: the drive is stuck on a defect.
+    clock.ms = 120_000;
+    tracker.update(RecoveryService.parseDdrescueStatus(statusBlock()));
+
+    expect(tracker.summary()).toContain("no new data for 2m 00s");
+    expect(tracker.summary()).toContain("working on a damaged area");
+  });
+
+  it("clears the stall notice once data flows again", () => {
+    const clock = { ms: 0 };
+    const tracker = trackerAt(clock);
+
+    tracker.update(RecoveryService.parseDdrescueStatus(statusBlock()));
+    clock.ms = 120_000;
+    tracker.update(RecoveryService.parseDdrescueStatus(statusBlock()));
+    expect(tracker.summary()).toContain("no new data");
+
+    clock.ms = 130_000;
+    tracker.update(
+      RecoveryService.parseDdrescueStatus(statusBlock({ rescued: "3000 MB" }))
     );
 
-    clock.ms = 30_000;
-    expect(
-      tracker.update(RecoveryService.parseDdrescueStatus(statusBlock()))
-    ).toBeNull();
-
-    clock.ms = 61_000;
-    expect(
-      tracker.update(RecoveryService.parseDdrescueStatus(statusBlock()))
-    ).not.toBeNull();
+    expect(tracker.summary()).not.toContain("no new data");
   });
 
   it("counts time between samples that hit new read errors", () => {
@@ -167,11 +189,12 @@ describe("RecoveryProgressTracker", () => {
     const clock = { ms: 0 };
     const tracker = trackerAt(clock);
 
-    const summary = tracker.update(
+    tracker.update(
       RecoveryService.parseDdrescueStatus(
         statusBlock({ badSector: "1434 kB", badAreas: 12, readErrors: 7 })
       )
     );
+    const summary = tracker.summary();
 
     expect(summary).toContain("44.65% of the disc read");
     expect(summary).toContain("12 damaged area(s)");

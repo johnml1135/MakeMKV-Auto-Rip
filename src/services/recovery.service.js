@@ -6,6 +6,7 @@ import { AppConfig } from "../config/index.js";
 import { Logger } from "../utils/logger.js";
 import { ValidationUtils } from "../utils/validation.js";
 import { MAKEMKV_READ_ERROR_MESSAGES } from "../constants/index.js";
+import { formatBytes, formatDuration } from "../utils/format.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -34,6 +35,9 @@ const SIZE_UNITS = {
  * as a physically damaged sector. These are the giveaways that the medium was
  * removed or the tray opened mid-rip, where imaging the disc is pointless.
  */
+/** How long without new data before a status line calls the operation stalled. */
+export const STALL_NOTICE_SEC = 90;
+
 const MEDIUM_ABSENT_PATTERNS = [
   "MEDIUM NOT PRESENT",
   "TRAY OPEN",
@@ -602,54 +606,47 @@ export class RecoveryService {
 export class RecoveryProgressTracker {
   /**
    * @param {Object} [options]
-   * @param {number} [options.intervalMs=60000] - Minimum gap between summaries
    * @param {number} [options.budgetSec] - Recovery time budget, for context
    * @param {() => number} [options.now] - Injectable clock
    */
   constructor(options = {}) {
-    this.intervalMs = options.intervalMs ?? 60_000;
     this.budgetSec = options.budgetSec ?? null;
     this.now = options.now ?? (() => Date.now());
 
     this.startedAtMs = this.now();
     this.lastSampleAtMs = this.startedAtMs;
-    // null rather than 0: an injected clock can legitimately report 0.
-    this.lastReportAtMs = null;
+    this.lastAdvanceAtMs = this.startedAtMs;
     this.damagedAreaMs = 0;
     this.latest = null;
   }
 
   /**
-   * Record a status snapshot.
+   * Record a status snapshot. Reporting is driven by a timer rather than by
+   * these updates, because ddrescue stops printing while the drive is stuck on
+   * a bad sector - the moment a status line matters most.
    * @param {Object} status - From RecoveryService.parseDdrescueStatus
-   * @returns {string|null} A summary line when one is due, otherwise null
    */
   update(status) {
     if (!status) {
-      return null;
+      return;
     }
 
     const nowMs = this.now();
     const sinceLastSample = nowMs - this.lastSampleAtMs;
     this.lastSampleAtMs = nowMs;
 
-    if (this.latest && this.#workedOnDamage(status, this.latest)) {
-      this.damagedAreaMs += sinceLastSample;
+    if (this.latest) {
+      if (this.#workedOnDamage(status, this.latest)) {
+        this.damagedAreaMs += sinceLastSample;
+      }
+      if (status.rescuedBytes > this.latest.rescuedBytes) {
+        this.lastAdvanceAtMs = nowMs;
+      }
+    } else {
+      this.lastAdvanceAtMs = nowMs;
     }
 
     this.latest = status;
-
-    // Report the first sample immediately so a long recovery announces itself,
-    // then no more often than the configured interval.
-    const due =
-      this.lastReportAtMs === null ||
-      nowMs - this.lastReportAtMs >= this.intervalMs;
-    if (!due) {
-      return null;
-    }
-
-    this.lastReportAtMs = nowMs;
-    return this.summary();
   }
 
   /**
@@ -661,14 +658,27 @@ export class RecoveryProgressTracker {
   }
 
   /**
+   * One line describing where the recovery has got to. Always returns something
+   * once imaging has started, including while ddrescue is stalled.
    * @param {Object} [options]
    * @param {boolean} [options.final]
    * @returns {string}
    */
   summary({ final = false } = {}) {
+    const nowMs = this.now();
+    const wallClockSec = Math.round((nowMs - this.startedAtMs) / 1000);
+
+    if (!this.latest) {
+      return `Recovering: waiting for the first ddrescue status - ${formatDuration(
+        wallClockSec
+      )} elapsed`;
+    }
+
     const status = this.latest;
-    const elapsedSec =
-      status.runTimeSec ?? Math.round((this.now() - this.startedAtMs) / 1000);
+    // Wall clock wins: ddrescue's own run time excludes everything around the
+    // copy (setup, flushing the image), and the budget is wall-clock too, so
+    // trusting ddrescue alone would under-report how long this has really taken.
+    const elapsedSec = Math.max(status.runTimeSec ?? 0, wallClockSec);
     const imaged = status.rescuedBytes + status.badBytes + status.nonTriedBytes;
 
     const parts = [
@@ -687,6 +697,15 @@ export class RecoveryProgressTracker {
     if (!final && this.budgetSec) {
       const remainingBudget = Math.max(0, this.budgetSec - elapsedSec);
       parts.push(`${formatDuration(remainingBudget)} of recovery budget left`);
+    }
+
+    // A drive grinding through a defect goes quiet: say so rather than
+    // repeating a number that has not moved.
+    const stalledSec = Math.round((nowMs - this.lastAdvanceAtMs) / 1000);
+    if (!final && stalledSec >= STALL_NOTICE_SEC) {
+      parts.push(
+        `no new data for ${formatDuration(stalledSec)} (the drive is working on a damaged area)`
+      );
     }
 
     return parts.join(" - ");
@@ -727,33 +746,3 @@ export class RecoveryProgressTracker {
   }
 }
 
-/**
- * @param {number} bytes
- * @returns {string} e.g. "1.4 MB", "2.05 GB"
- */
-export function formatBytes(bytes) {
-  const value = Number(bytes) || 0;
-  if (value >= 1e9) return `${(value / 1e9).toFixed(2)} GB`;
-  if (value >= 1e6) return `${(value / 1e6).toFixed(1)} MB`;
-  if (value >= 1e3) return `${(value / 1e3).toFixed(0)} kB`;
-  return `${value} B`;
-}
-
-/**
- * @param {number} seconds
- * @returns {string} e.g. "45s", "12m 05s", "1h 03m"
- */
-export function formatDuration(seconds) {
-  const total = Math.max(0, Math.round(Number(seconds) || 0));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-
-  if (hours > 0) {
-    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${String(secs).padStart(2, "0")}s`;
-  }
-  return `${secs}s`;
-}

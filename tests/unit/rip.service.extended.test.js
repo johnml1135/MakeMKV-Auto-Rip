@@ -146,28 +146,61 @@ describe("RipService - Extended Coverage", () => {
       expect(exec.mock.calls[0][0]).not.toContain("--cache");
     });
 
-    it("logs rip progress no more than once a minute", () => {
-      const listeners = [];
-      const childProcess = {
-        stdout: { on: (event, handler) => listeners.push(handler) },
-      };
-      const startedAt = Date.now() - 61_000; // first sample is already due
+    it("logs rip progress every minute, driven by the clock not the output", () => {
+      vi.useFakeTimers();
+      try {
+        const listeners = [];
+        const childProcess = {
+          stdout: { on: (event, handler) => listeners.push(handler) },
+          once: vi.fn(),
+        };
 
-      ripService.reportRipProgress(
-        childProcess,
-        { title: "Movie" },
-        startedAt
-      );
+        const stop = ripService.reportRipProgress(
+          childProcess,
+          { title: "Movie" },
+          Date.now()
+        );
 
-      listeners[0](Buffer.from("PRGV:100,32768,65536\n"));
-      expect(Logger.info).toHaveBeenCalledWith(
-        expect.stringContaining("Ripping Movie: 50.0%")
-      );
+        listeners[0](Buffer.from("PRGV:100,32768,65536\n"));
+        expect(Logger.info).not.toHaveBeenCalled(); // nothing until the first beat
 
-      // A second chunk moments later must not produce another line.
-      Logger.info.mockClear();
-      listeners[0](Buffer.from("PRGV:100,49152,65536\n"));
-      expect(Logger.info).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(60_000);
+        expect(Logger.info).toHaveBeenCalledWith(
+          expect.stringContaining("Ripping Movie: 50.0%")
+        );
+
+        // MakeMKV goes silent - the minute update must still arrive, and say so.
+        Logger.info.mockClear();
+        vi.advanceTimersByTime(60_000);
+        const [message] = Logger.info.mock.calls.at(-1);
+        expect(message).toContain("Ripping Movie: 50.0%");
+        expect(message).toContain("no progress for");
+
+        stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("reports elapsed time even before any progress is parsed", () => {
+      vi.useFakeTimers();
+      try {
+        const childProcess = { stdout: { on: vi.fn() }, once: vi.fn() };
+        const stop = ripService.reportRipProgress(
+          childProcess,
+          { title: "Movie" },
+          Date.now()
+        );
+
+        vi.advanceTimersByTime(60_000);
+
+        expect(Logger.info).toHaveBeenCalledWith(
+          expect.stringContaining("no progress reported yet")
+        );
+        stop();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("keeps progress chatter out of the saved log file", () => {

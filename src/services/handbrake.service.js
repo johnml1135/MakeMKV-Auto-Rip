@@ -9,6 +9,8 @@ import { Logger } from "../utils/logger.js";
 import { FileSystemUtils } from "../utils/filesystem.js";
 import { HANDBRAKE_CONSTANTS } from "../constants/index.js";
 import { validateHandBrakeConfig } from "../utils/handbrake-config.js";
+import { ProgressHeartbeat } from "../utils/heartbeat.js";
+import { formatDuration } from "../utils/format.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -170,6 +172,49 @@ export class HandBrakeService {
   }
 
   /**
+   * Report encode progress once a minute, parsed from HandBrakeCLI's own
+   * "Encoding: task 1 of 1, 42.10 %" output. An encode runs for tens of minutes
+   * alongside the next rip, so silence for that long is not acceptable.
+   * @param {import('child_process').ChildProcess} [child]
+   * @param {string} label - File being encoded
+   * @returns {() => void} stop function
+   */
+  static reportProgress(child, label) {
+    if (!child) {
+      return () => {};
+    }
+
+    const startedAtMs = Date.now();
+    let percent = null;
+
+    const scan = (chunk) => {
+      const matches = [...chunk.toString().matchAll(/([\d.]+)\s*%/g)];
+      const latest = matches[matches.length - 1];
+      if (latest) {
+        percent = Number.parseFloat(latest[1]);
+      }
+    };
+    child.stdout?.on("data", scan);
+    child.stderr?.on("data", scan);
+
+    const heartbeat = new ProgressHeartbeat({
+      describe: () => {
+        const elapsed = formatDuration(
+          Math.round((Date.now() - startedAtMs) / 1000)
+        );
+        return percent === null
+          ? `Encoding ${label}: ${elapsed} elapsed`
+          : `Encoding ${label}: ${percent.toFixed(1)}% - ${elapsed} elapsed`;
+      },
+    });
+
+    const stop = heartbeat.start();
+    child.once?.("close", stop);
+    child.once?.("error", stop);
+    return stop;
+  }
+
+  /**
    * Drop an encode to below-normal CPU priority. Encoding now overlaps the next
    * disc's rip, and MakeMKV's demux/mux work should never queue behind a job
    * that is happy to take an extra few minutes.
@@ -237,8 +282,18 @@ export class HandBrakeService {
           signal,
         });
         this.deprioritize(retry.child);
+        const stopProgress = this.reportProgress(
+          retry.child,
+          `${path.basename(inputPath)} (retry ${attempt + 1})`
+        );
 
-        const { stdout, stderr } = await retry;
+        let stdout;
+        let stderr;
+        try {
+          ({ stdout, stderr } = await retry);
+        } finally {
+          stopProgress();
+        }
 
         this.parseHandBrakeOutput(stdout, stderr);
         await this.validateOutput(outputPath);
@@ -667,8 +722,18 @@ export class HandBrakeService {
         signal,
       });
       this.deprioritize(conversion.child);
+      const stopProgress = this.reportProgress(
+        conversion.child,
+        path.basename(inputPath)
+      );
 
-      const { stdout, stderr } = await conversion;
+      let stdout;
+      let stderr;
+      try {
+        ({ stdout, stderr } = await conversion);
+      } finally {
+        stopProgress();
+      }
 
       // Parse HandBrake output for progress and warnings
       this.parseHandBrakeOutput(stdout, stderr);

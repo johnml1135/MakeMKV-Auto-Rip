@@ -12,8 +12,10 @@ import { HandBrakeService } from "./handbrake.service.js";
 import {
   RecoveryService,
   RecoveryProgressTracker,
-  formatDuration,
+  STALL_NOTICE_SEC,
 } from "./recovery.service.js";
+import { formatDuration } from "../utils/format.js";
+import { ProgressHeartbeat } from "../utils/heartbeat.js";
 import { safeExit, withSystemDate, killProcessTree } from "../utils/process.js";
 import { MakeMKVMessages } from "../utils/makemkv-messages.js";
 
@@ -474,48 +476,68 @@ export class RipService {
   }
 
   /**
-   * Log rip progress once a minute from MakeMKV's PRGV stream, so a disc that
-   * is reading slowly is visible while it happens instead of only in hindsight.
+   * Report rip progress once a minute from MakeMKV's PRGV stream.
+   *
+   * The timer owns the reporting, not the stream: when a drive struggles it
+   * stops emitting progress altogether, and "no progress for 4m" is the most
+   * useful thing the log can say at that moment.
    * @param {import('child_process').ChildProcess} childProcess
    * @param {Object} commandDataItem - Disc information object
    * @param {number} startedAtMs
+   * @returns {() => void} stop function
    */
   reportRipProgress(childProcess, commandDataItem, startedAtMs) {
     if (!childProcess?.stdout) {
-      return;
+      return () => {};
     }
 
-    let lastReportAtMs = startedAtMs;
+    let percent = null;
+    let lastAdvanceAtMs = startedAtMs;
     let tail = "";
 
     childProcess.stdout.on("data", (chunk) => {
       tail = (tail + chunk.toString()).slice(-2000);
 
-      const nowMs = Date.now();
-      if (nowMs - lastReportAtMs < RIP_PROGRESS_INTERVAL_MS) {
-        return;
-      }
-
       // PRGV:<current>,<total>,<max> - the second value tracks the whole job.
       const matches = [...tail.matchAll(/PRGV:(\d+),(\d+),(\d+)/g)];
       const latest = matches[matches.length - 1];
-      if (!latest) {
+      const max = latest ? Number.parseInt(latest[3], 10) : 0;
+      if (!max) {
         return;
       }
 
-      const total = Number.parseInt(latest[3], 10);
-      if (!total) {
-        return;
+      const current = (Number.parseInt(latest[2], 10) / max) * 100;
+      if (percent === null || current > percent) {
+        lastAdvanceAtMs = Date.now();
       }
-
-      lastReportAtMs = nowMs;
-      const percent = (Number.parseInt(latest[2], 10) / total) * 100;
-      Logger.info(
-        `Ripping ${commandDataItem.title}: ${percent.toFixed(1)}% after ${formatDuration(
-          Math.round((nowMs - startedAtMs) / 1000)
-        )}`
-      );
+      percent = current;
     });
+
+    const heartbeat = new ProgressHeartbeat({
+      intervalMs: RIP_PROGRESS_INTERVAL_MS,
+      describe: () => {
+        const nowMs = Date.now();
+        const elapsed = formatDuration(Math.round((nowMs - startedAtMs) / 1000));
+        const stalledSec = Math.round((nowMs - lastAdvanceAtMs) / 1000);
+        const stalled =
+          stalledSec >= STALL_NOTICE_SEC
+            ? ` - no progress for ${formatDuration(stalledSec)} (the drive may be retrying a damaged area)`
+            : "";
+
+        if (percent === null) {
+          return `Ripping ${commandDataItem.title}: ${elapsed} elapsed, no progress reported yet${stalled}`;
+        }
+
+        return `Ripping ${commandDataItem.title}: ${percent.toFixed(
+          1
+        )}% - ${elapsed} elapsed${stalled}`;
+      },
+    });
+
+    const stop = heartbeat.start();
+    childProcess.once?.("close", stop);
+    childProcess.once?.("error", stop);
+    return stop;
   }
 
   /**
@@ -759,12 +781,14 @@ export class RipService {
       }
 
       const budgetSec = this.getRecoveryBudgetSeconds(ripDurationMs);
-      const tracker = new RecoveryProgressTracker({
+      const tracker = new RecoveryProgressTracker({ budgetSec });
+      const heartbeat = new ProgressHeartbeat({
         intervalMs: RIP_PROGRESS_INTERVAL_MS,
-        budgetSec,
+        describe: () => `[ddrescue] ${commandDataItem.title}: ${tracker.summary()}`,
       });
 
       let recoveryCleanup = () => {};
+      let stopHeartbeat = () => {};
       try {
         Logger.info(
           `Imaging ${commandDataItem.title} with ddrescue to recover read errors. ` +
@@ -772,6 +796,7 @@ export class RipService {
               Math.round(ripDurationMs / 1000)
             )}); progress follows every minute.`
         );
+        stopHeartbeat = heartbeat.start();
         await RecoveryService.recoverDiscToImage(
           commandDataItem.driveNumber,
           imagePath,
@@ -779,12 +804,7 @@ export class RipService {
             maxRuntimeSeconds: budgetSec,
             onProgress: (line) =>
               Logger.info(`[ddrescue] ${line.replace(/^ddrescue-recover:\s*/, "")}`),
-            onStatus: (status) => {
-              const summary = tracker.update(status);
-              if (summary) {
-                Logger.info(`[ddrescue] ${commandDataItem.title}: ${summary}`);
-              }
-            },
+            onStatus: (status) => tracker.update(status),
             onChild: (child) => {
               recoveryCleanup = this.registerRipProcess(child);
             },
@@ -799,6 +819,7 @@ export class RipService {
         Logger.info(`Keeping partial recovery image for resume: ${imagePath}`);
         return;
       } finally {
+        stopHeartbeat();
         recoveryCleanup();
         const finalSummary = tracker.finish();
         if (finalSummary) {
