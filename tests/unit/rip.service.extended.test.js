@@ -110,6 +110,85 @@ describe("RipService - Extended Coverage", () => {
     vi.restoreAllMocks();
   });
 
+  describe("rip throughput and progress", () => {
+    beforeEach(() => {
+      MakeMKVMessages.checkOutput.mockReturnValue(true);
+    });
+
+    it("passes the configured read cache to makemkvcon", async () => {
+      AppConfig.readCacheMb = 256;
+      exec.mockImplementation((command, options, callback) => {
+        setTimeout(() => callback(null, "MSG:5036", ""), 0);
+        return { once: vi.fn(), kill: vi.fn() };
+      });
+
+      await ripService.ripSingleDisc(
+        { title: "Movie", driveNumber: 0, fileNumber: 0 },
+        "/test/output"
+      );
+
+      expect(exec.mock.calls[0][0]).toContain("--cache=256");
+      expect(exec.mock.calls[0][0]).toContain("--progress=-same");
+    });
+
+    it("omits the cache option when it is not configured", async () => {
+      AppConfig.readCacheMb = 0;
+      exec.mockImplementation((command, options, callback) => {
+        setTimeout(() => callback(null, "MSG:5036", ""), 0);
+        return { once: vi.fn(), kill: vi.fn() };
+      });
+
+      await ripService.ripSingleDisc(
+        { title: "Movie", driveNumber: 0, fileNumber: 0 },
+        "/test/output"
+      );
+
+      expect(exec.mock.calls[0][0]).not.toContain("--cache");
+    });
+
+    it("logs rip progress no more than once a minute", () => {
+      const listeners = [];
+      const childProcess = {
+        stdout: { on: (event, handler) => listeners.push(handler) },
+      };
+      const startedAt = Date.now() - 61_000; // first sample is already due
+
+      ripService.reportRipProgress(
+        childProcess,
+        { title: "Movie" },
+        startedAt
+      );
+
+      listeners[0](Buffer.from("PRGV:100,32768,65536\n"));
+      expect(Logger.info).toHaveBeenCalledWith(
+        expect.stringContaining("Ripping Movie: 50.0%")
+      );
+
+      // A second chunk moments later must not produce another line.
+      Logger.info.mockClear();
+      listeners[0](Buffer.from("PRGV:100,49152,65536\n"));
+      expect(Logger.info).not.toHaveBeenCalled();
+    });
+
+    it("keeps progress chatter out of the saved log file", () => {
+      const stdout = [
+        'MSG:5036,260,1,"Copy complete. 2 titles saved."',
+        "PRGV:100,32768,65536",
+        "PRGC:5018,0,\"Saving titles\"",
+        "PRGT:5018,0,\"Saving titles\"",
+        "DRV:0,2,999,1,\"drive\",\"Movie\",\"F:\"",
+      ].join("\n");
+
+      const stripped = ripService.stripProgressLines(stdout);
+
+      expect(stripped).toContain("MSG:5036");
+      expect(stripped).toContain("DRV:0");
+      expect(stripped).not.toContain("PRGV");
+      expect(stripped).not.toContain("PRGC");
+      expect(stripped).not.toContain("PRGT");
+    });
+  });
+
   describe("startRipping - no discs found", () => {
     it("should handle case with no discs gracefully", async () => {
       DiscService.getAvailableDiscs.mockResolvedValue([]);

@@ -19,6 +19,29 @@ const SCRIPT_PATH = path.resolve(__dirname, "../../scripts/ddrescue-recover.sh")
  */
 const shQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
+/** Strips the cursor-movement escapes ddrescue uses to redraw its status block. */
+const ANSI_ESCAPE = /\x1B\[[0-9;]*[A-Za-z]/g;
+
+/** SI and binary size suffixes as printed by ddrescue ("3000 kB", "1 GiB"). */
+const SIZE_UNITS = {
+  B: 1,
+  kB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12, PB: 1e15, EB: 1e18,
+  KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3, TiB: 1024 ** 4,
+};
+
+/**
+ * MakeMKV reports "the disc is gone" through the same MSG:2003 read-error code
+ * as a physically damaged sector. These are the giveaways that the medium was
+ * removed or the tray opened mid-rip, where imaging the disc is pointless.
+ */
+const MEDIUM_ABSENT_PATTERNS = [
+  "MEDIUM NOT PRESENT",
+  "TRAY OPEN",
+  "NO DISK",
+  "NO MEDIUM",
+  "NOT READY",
+];
+
 /**
  * Service for recovering titles from damaged/scratched discs using GNU ddrescue
  * via MSYS2. ddrescue images the disc while skipping unreadable areas, allowing
@@ -45,6 +68,12 @@ export class RecoveryService {
       return false;
     }
 
+    // "Tray open" / "no disk" are reported as read errors too, but the disc is
+    // gone rather than damaged - there is nothing for ddrescue to image.
+    if (this.isMediumAbsentFailure(stdout)) {
+      return false;
+    }
+
     const hasTitleFailure = stdout.includes(
       MAKEMKV_READ_ERROR_MESSAGES.TITLE_SAVE_FAILED
     );
@@ -53,6 +82,45 @@ export class RecoveryService {
     // errors and the rip never reported a successful completion at all (a
     // whole-disc abort, where the per-title MSG:5003 lines may be absent).
     return hasTitleFailure || !ValidationUtils.isCopyComplete(stdout);
+  }
+
+  /**
+   * Whether every read error in the output says the medium went away (tray
+   * opened, disc removed) rather than that a sector could not be read. Imaging
+   * such a disc is pointless - and it is the signature of a disc pulled or
+   * ejected mid-rip, which is worth telling the user about directly.
+   * @param {string} stdout - Raw MakeMKV output
+   * @returns {boolean}
+   */
+  static isMediumAbsentFailure(stdout) {
+    const readErrorLines = this.#getReadErrorLines(stdout);
+    return (
+      readErrorLines.length > 0 &&
+      readErrorLines.every((line) => this.#isMediumAbsentError(line))
+    );
+  }
+
+  /**
+   * @param {string} stdout
+   * @returns {string[]} MSG:2003 read-error lines
+   */
+  static #getReadErrorLines(stdout) {
+    if (!stdout || typeof stdout !== "string") {
+      return [];
+    }
+
+    return stdout
+      .split(/\r?\n/)
+      .filter((line) => line.includes(MAKEMKV_READ_ERROR_MESSAGES.READ_ERROR));
+  }
+
+  /**
+   * @param {string} line
+   * @returns {boolean} whether the error means "no disc" rather than "bad sector"
+   */
+  static #isMediumAbsentError(line) {
+    const upper = line.toUpperCase();
+    return MEDIUM_ABSENT_PATTERNS.some((pattern) => upper.includes(pattern));
   }
 
   /**
@@ -159,18 +227,23 @@ export class RecoveryService {
    * @param {string|number} driveNumber - MakeMKV drive number
    * @param {string} imagePath - Destination image path (Windows path)
    * @param {Object} [options]
-   * @param {(line: string) => void} [options.onProgress] - Progress line callback
+   * @param {(line: string) => void} [options.onProgress] - Helper-script log lines
+   * @param {(status: Object) => void} [options.onStatus] - Parsed ddrescue status snapshots
+   * @param {number} [options.maxRuntimeSeconds] - Overrides the configured hard
+   *   time cap, so recovery can be budgeted against how long the rip itself took
    * @param {(child: import('child_process').ChildProcess) => void} [options.onChild] - Receives the spawned process
    * @returns {Promise<{imagePath: string}>}
    */
   static recoverDiscToImage(driveNumber, imagePath, options = {}) {
-    const { onProgress, onChild } = options;
+    const { onProgress, onStatus, onChild } = options;
 
     return new Promise((resolve, reject) => {
       const bash = this.getBashPath();
       const device = this.mapDriveToDevice(driveNumber);
       const { passes, retries, timeout, maxRuntime, reversePass, direct, resume } =
         AppConfig.readErrorRecovery;
+      const maxRuntimeSeconds =
+        options.maxRuntimeSeconds ?? this.parseDurationToSeconds(maxRuntime);
 
       // Tuning is passed through the environment so the positional command stays
       // simple. The script reads DDR_* with sane defaults if any are missing.
@@ -179,7 +252,7 @@ export class RecoveryService {
         DDR_PASSES: String(passes),
         DDR_RETRIES: String(retries),
         DDR_TIMEOUT: timeout || "",
-        DDR_MAX_RUNTIME: String(this.parseDurationToSeconds(maxRuntime)),
+        DDR_MAX_RUNTIME: String(Math.max(0, Math.round(maxRuntimeSeconds))),
         DDR_REVERSE: reversePass ? "1" : "0",
         DDR_DIRECT: direct ? "1" : "0",
         DDR_RESUME: resume ? "1" : "0",
@@ -207,19 +280,51 @@ export class RecoveryService {
       }
 
       let stderrTail = "";
+      // ddrescue redraws its six-line status block in place, so a single chunk
+      // rarely holds a whole one; the parser reads from a rolling tail instead.
+      let statusTail = "";
+
+      const emitLines = (text) => {
+        if (typeof onProgress !== "function") {
+          return;
+        }
+        for (const line of text.split(/[\r\n]+/)) {
+          const trimmed = line.replace(ANSI_ESCAPE, "").trim();
+          if (trimmed) {
+            onProgress(trimmed);
+          }
+        }
+      };
+
       const handleData = (buffer, isError) => {
         const text = buffer.toString();
+
         if (isError) {
           stderrTail = (stderrTail + text).slice(-2000);
+          emitLines(text);
+          return;
         }
-        if (typeof onProgress === "function") {
-          // ddrescue rewrites its status line with a bare carriage return, so
-          // split on CR as well as LF to stream live progress instead of one blob.
-          for (const line of text.split(/[\r\n]+/)) {
-            const trimmed = line.trim();
-            if (trimmed) {
-              onProgress(trimmed);
-            }
+
+        // The helper script prefixes its own log lines; everything else on
+        // stdout is ddrescue's status display, which is parsed rather than
+        // echoed (it would otherwise flood the log several times a second).
+        const scriptLines = [];
+        const statusChunks = [];
+        for (const line of text.split(/[\r\n]+/)) {
+          if (line.includes("ddrescue-recover:")) {
+            scriptLines.push(line);
+          } else {
+            statusChunks.push(line);
+          }
+        }
+
+        emitLines(scriptLines.join("\n"));
+
+        if (typeof onStatus === "function" && statusChunks.length > 0) {
+          statusTail = (statusTail + "\n" + statusChunks.join("\n")).slice(-4000);
+          const status = this.parseDdrescueStatus(statusTail);
+          if (status) {
+            onStatus(status);
           }
         }
       };
@@ -250,6 +355,111 @@ export class RecoveryService {
         );
       });
     });
+  }
+
+  /**
+   * Parse ddrescue's periodic status block into a snapshot.
+   *
+   * ddrescue redraws six fixed lines in place using carriage returns and cursor
+   * escapes, so the caller feeds in a rolling tail of recent output and every
+   * field is taken from its last occurrence in that tail.
+   * @param {string} text - Recent ddrescue stdout
+   * @returns {{rescuedBytes: number, badBytes: number, badAreas: number,
+   *   readErrors: number, nonTriedBytes: number, pctRescued: number,
+   *   runTimeSec: number|null, remainingSec: number|null,
+   *   currentRateBps: number|null, phase: string|null}|null} null when the text
+   *   holds no status block yet
+   */
+  static parseDdrescueStatus(text) {
+    if (!text || typeof text !== "string") {
+      return null;
+    }
+
+    const clean = text.replace(ANSI_ESCAPE, "").replace(/\r/g, "\n");
+    const lastMatch = (pattern) => {
+      const matches = [...clean.matchAll(pattern)];
+      return matches.length ? matches[matches.length - 1] : null;
+    };
+
+    const size = (label) => {
+      const match = lastMatch(
+        new RegExp(`${label}:\\s*([\\d.]+)\\s*([kKMGTP]?i?B)\\b`, "g")
+      );
+      return match ? this.parseSize(match[1], match[2]) : null;
+    };
+    const count = (label) => {
+      const match = lastMatch(new RegExp(`${label}:\\s*(\\d+)`, "g"));
+      return match ? Number.parseInt(match[1], 10) : null;
+    };
+    const duration = (label) => {
+      const match = lastMatch(new RegExp(`${label}:\\s*([\\dhmsd\\s]+|n/a)`, "g"));
+      return match ? this.parseElapsed(match[1]) : null;
+    };
+
+    const pctMatch = lastMatch(/pct rescued:\s*([\d.]+)%/g);
+    const rescuedBytes = size("rescued");
+
+    // Nothing recognisable yet - the tail is mid-block or holds other output.
+    if (pctMatch === null && rescuedBytes === null) {
+      return null;
+    }
+
+    const rateMatch = lastMatch(
+      /current rate:\s*([\d.]+)\s*([kKMGTP]?i?B)\/s/g
+    );
+    const phaseMatch = lastMatch(
+      /^(Copying non-tried blocks|Trimming failed blocks|Scraping failed blocks|Retrying bad sectors|Finished)/gm
+    );
+
+    return {
+      rescuedBytes: rescuedBytes ?? 0,
+      badBytes: size("bad-sector") ?? 0,
+      badAreas: count("bad areas") ?? 0,
+      readErrors: count("read errors") ?? 0,
+      nonTriedBytes: size("non-tried") ?? 0,
+      pctRescued: pctMatch ? Number.parseFloat(pctMatch[1]) : 0,
+      runTimeSec: duration("run time"),
+      remainingSec: duration("remaining time"),
+      currentRateBps: rateMatch
+        ? this.parseSize(rateMatch[1], rateMatch[2])
+        : null,
+      phase: phaseMatch ? phaseMatch[1] : null,
+    };
+  }
+
+  /**
+   * @param {string} value - Numeric part, e.g. "3000"
+   * @param {string} unit - Suffix as printed by ddrescue, e.g. "kB"
+   * @returns {number} bytes
+   */
+  static parseSize(value, unit) {
+    const amount = Number.parseFloat(value);
+    if (!Number.isFinite(amount)) {
+      return 0;
+    }
+    return Math.round(amount * (SIZE_UNITS[unit] ?? 1));
+  }
+
+  /**
+   * Parse an elapsed time as ddrescue prints it ("45s", "1m 23s", "2h 3m 4s").
+   * @param {string} value
+   * @returns {number|null} seconds, or null for "n/a"
+   */
+  static parseElapsed(value) {
+    const text = String(value).trim();
+    if (!text || text.startsWith("n/a")) {
+      return null;
+    }
+
+    let seconds = 0;
+    let matched = false;
+    const units = { d: 86400, h: 3600, m: 60, s: 1 };
+    for (const [, amount, unit] of text.matchAll(/(\d+)\s*([dhms])/g)) {
+      seconds += Number.parseInt(amount, 10) * units[unit];
+      matched = true;
+    }
+
+    return matched ? seconds : null;
   }
 
   /**
@@ -377,4 +587,173 @@ export class RecoveryService {
     }
     return deleted;
   }
+}
+
+/**
+ * Turns ddrescue's once-a-second status blocks into an occasional human
+ * summary, and keeps the running totals that ddrescue itself does not report -
+ * most importantly how much of the wall clock has gone into damaged areas.
+ *
+ * Time is attributed to damaged areas when a sample shows new read errors or
+ * more unreadable bytes than the one before it (the drive spent that interval
+ * retrying), or when ddrescue is in a trim/scrape/retry phase, all of which
+ * exist solely to work on damaged areas.
+ */
+export class RecoveryProgressTracker {
+  /**
+   * @param {Object} [options]
+   * @param {number} [options.intervalMs=60000] - Minimum gap between summaries
+   * @param {number} [options.budgetSec] - Recovery time budget, for context
+   * @param {() => number} [options.now] - Injectable clock
+   */
+  constructor(options = {}) {
+    this.intervalMs = options.intervalMs ?? 60_000;
+    this.budgetSec = options.budgetSec ?? null;
+    this.now = options.now ?? (() => Date.now());
+
+    this.startedAtMs = this.now();
+    this.lastSampleAtMs = this.startedAtMs;
+    // null rather than 0: an injected clock can legitimately report 0.
+    this.lastReportAtMs = null;
+    this.damagedAreaMs = 0;
+    this.latest = null;
+  }
+
+  /**
+   * Record a status snapshot.
+   * @param {Object} status - From RecoveryService.parseDdrescueStatus
+   * @returns {string|null} A summary line when one is due, otherwise null
+   */
+  update(status) {
+    if (!status) {
+      return null;
+    }
+
+    const nowMs = this.now();
+    const sinceLastSample = nowMs - this.lastSampleAtMs;
+    this.lastSampleAtMs = nowMs;
+
+    if (this.latest && this.#workedOnDamage(status, this.latest)) {
+      this.damagedAreaMs += sinceLastSample;
+    }
+
+    this.latest = status;
+
+    // Report the first sample immediately so a long recovery announces itself,
+    // then no more often than the configured interval.
+    const due =
+      this.lastReportAtMs === null ||
+      nowMs - this.lastReportAtMs >= this.intervalMs;
+    if (!due) {
+      return null;
+    }
+
+    this.lastReportAtMs = nowMs;
+    return this.summary();
+  }
+
+  /**
+   * Final summary for when the recovery pass ends.
+   * @returns {string|null}
+   */
+  finish() {
+    return this.latest ? this.summary({ final: true }) : null;
+  }
+
+  /**
+   * @param {Object} [options]
+   * @param {boolean} [options.final]
+   * @returns {string}
+   */
+  summary({ final = false } = {}) {
+    const status = this.latest;
+    const elapsedSec =
+      status.runTimeSec ?? Math.round((this.now() - this.startedAtMs) / 1000);
+    const imaged = status.rescuedBytes + status.badBytes + status.nonTriedBytes;
+
+    const parts = [
+      `${final ? "Recovery finished at" : "Recovering:"} ${status.pctRescued.toFixed(2)}% of the disc read`,
+      `${formatBytes(status.rescuedBytes)}${imaged > 0 ? ` of ${formatBytes(imaged)}` : ""} recovered`,
+      `${status.badAreas} damaged area(s), ${formatBytes(status.badBytes)} unreadable so far`,
+      `${formatDuration(elapsedSec)} elapsed, ${formatDuration(
+        Math.round(this.damagedAreaMs / 1000)
+      )} of it on damaged areas`,
+    ];
+
+    if (!final && status.remainingSec !== null) {
+      parts.push(`about ${formatDuration(status.remainingSec)} left`);
+    }
+
+    if (!final && this.budgetSec) {
+      const remainingBudget = Math.max(0, this.budgetSec - elapsedSec);
+      parts.push(`${formatDuration(remainingBudget)} of recovery budget left`);
+    }
+
+    return parts.join(" - ");
+  }
+
+  /**
+   * @returns {{damagedAreaSec: number, badAreas: number, badBytes: number,
+   *   readErrors: number, pctRescued: number}} totals for the run
+   */
+  totals() {
+    return {
+      damagedAreaSec: Math.round(this.damagedAreaMs / 1000),
+      badAreas: this.latest?.badAreas ?? 0,
+      badBytes: this.latest?.badBytes ?? 0,
+      readErrors: this.latest?.readErrors ?? 0,
+      pctRescued: this.latest?.pctRescued ?? 0,
+    };
+  }
+
+  /**
+   * @param {Object} current
+   * @param {Object} previous
+   * @returns {boolean} whether the interval between two samples was spent on
+   *   damaged areas
+   */
+  #workedOnDamage(current, previous) {
+    if (
+      current.readErrors > previous.readErrors ||
+      current.badBytes > previous.badBytes
+    ) {
+      return true;
+    }
+
+    return Boolean(
+      current.phase &&
+        /Trimming|Scraping|Retrying/.test(current.phase)
+    );
+  }
+}
+
+/**
+ * @param {number} bytes
+ * @returns {string} e.g. "1.4 MB", "2.05 GB"
+ */
+export function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1e9) return `${(value / 1e9).toFixed(2)} GB`;
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)} MB`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(0)} kB`;
+  return `${value} B`;
+}
+
+/**
+ * @param {number} seconds
+ * @returns {string} e.g. "45s", "12m 05s", "1h 03m"
+ */
+export function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(secs).padStart(2, "0")}s`;
+  }
+  return `${secs}s`;
 }

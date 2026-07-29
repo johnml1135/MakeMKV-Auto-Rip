@@ -15,6 +15,8 @@ const recoveryConfig = {
   retries: 3,
   timeout: "30m",
   maxRuntime: "90m",
+  maxRuntimeRatio: 1,
+  minRuntime: "10m",
   reversePass: true,
   direct: false,
   resume: true,
@@ -68,6 +70,15 @@ vi.mock("../../src/utils/makemkv-messages.js", () => ({
 
 const recoveryMock = {
   isReadErrorFailure: vi.fn(() => true),
+  isMediumAbsentFailure: vi.fn(() => false),
+  // Mirrors the real duration parser so budget maths stays meaningful here.
+  parseDurationToSeconds: vi.fn((value) => {
+    const match = String(value ?? "").trim().match(/^(\d+)\s*([smh]?)$/i);
+    if (!match) return 0;
+    const amount = Number.parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    return unit === "h" ? amount * 3600 : unit === "m" ? amount * 60 : amount;
+  }),
   getFailedTitleIds: vi.fn(() => [0]),
   isAvailable: vi.fn(() => Promise.resolve(true)),
   recoverDiscToImage: vi.fn(() => Promise.resolve({ imagePath: "img" })),
@@ -82,6 +93,15 @@ const recoveryMock = {
 };
 vi.mock("../../src/services/recovery.service.js", () => ({
   RecoveryService: recoveryMock,
+  RecoveryProgressTracker: class {
+    update() {
+      return null;
+    }
+    finish() {
+      return null;
+    }
+  },
+  formatDuration: (seconds) => `${seconds}s`,
 }));
 
 // fs stub. Defaults: paths exist, no lock present, plenty of free space.
@@ -152,8 +172,12 @@ describe("RipService read-error recovery orchestration", () => {
       resume: true,
       imageRetentionDays: 7,
       minFreeGb: 10,
+      maxRuntime: "90m",
+      maxRuntimeRatio: 1,
+      minRuntime: "10m",
     });
     recoveryMock.isReadErrorFailure.mockReturnValue(true);
+    recoveryMock.isMediumAbsentFailure.mockReturnValue(false);
     recoveryMock.getFailedTitleIds.mockReturnValue([0]);
     recoveryMock.isAvailable.mockResolvedValue(true);
     recoveryMock.recoverDiscToImage.mockResolvedValue({ imagePath: "img" });
@@ -208,6 +232,47 @@ describe("RipService read-error recovery orchestration", () => {
     readdirResults.push([], []);
     await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
     expect(recoveryMock.recoverDiscToImage).not.toHaveBeenCalled();
+  });
+
+  it("skips recovery when the disc was removed mid-rip", async () => {
+    recoveryMock.isMediumAbsentFailure.mockReturnValue(true);
+
+    await rip.attemptReadErrorRecovery(READ_ERROR_STDOUT, item);
+
+    expect(recoveryMock.recoverDiscToImage).not.toHaveBeenCalled();
+  });
+
+  describe("recovery time budget", () => {
+    const budgetOf = async (ripDurationMs) => {
+      readdirResults.push([], ["Movie_t00.mkv"]);
+      await rip.attemptReadErrorRecovery(
+        READ_ERROR_STDOUT,
+        item,
+        undefined,
+        ripDurationMs
+      );
+      return recoveryMock.recoverDiscToImage.mock.calls.at(-1)[2]
+        .maxRuntimeSeconds;
+    };
+
+    it("budgets one rip's worth of imaging time", async () => {
+      // 20 minute rip -> 20 minutes of imaging, so the disc costs ~2x overall.
+      expect(await budgetOf(20 * 60 * 1000)).toBe(1200);
+    });
+
+    it("honours the ratio", async () => {
+      recoveryConfig.maxRuntimeRatio = 0.5;
+      expect(await budgetOf(20 * 60 * 1000)).toBe(600);
+    });
+
+    it("never drops below min_runtime", async () => {
+      // A rip that died after 30 seconds still gets a usable attempt.
+      expect(await budgetOf(30 * 1000)).toBe(600);
+    });
+
+    it("never exceeds the absolute max_runtime ceiling", async () => {
+      expect(await budgetOf(4 * 60 * 60 * 1000)).toBe(5400);
+    });
   });
 
   it("sweeps stale images before starting", async () => {

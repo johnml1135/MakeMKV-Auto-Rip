@@ -78,10 +78,11 @@ trap stop_watchdog EXIT
 
 # Run one ddrescue pass in the background and wait, so a trapped signal can
 # interrupt the wait, kill the child, and abort before the next pass. ddrescue's
-# per-second progress display (stdout) is discarded to keep the app log clean;
-# real errors still go to stderr. We print our own one-line summary per pass.
+# per-second status block is left on stdout: the app parses it for live progress
+# (percentage, bad areas, rates) and throttles it down to a periodic summary.
+# Our own "ddrescue-recover:" lines are how the app tells the two apart.
 run_pass() {
-  ddrescue "$@" >/dev/null &
+  ddrescue "$@" &
   CURRENT_PID=$!
   wait "$CURRENT_PID"
   local rc=$?

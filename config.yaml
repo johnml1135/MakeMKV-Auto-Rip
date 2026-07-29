@@ -42,6 +42,9 @@ ripping:
   rip_all_titles: true
   # Ripping mode - async for parallel processing, sync for sequential (async/sync)
   mode: "async"
+  # MakeMKV read-cache size in MB (makemkvcon --cache). A larger cache smooths
+  # out reads on slow or marginal discs. 0 uses MakeMKV's own default.
+  read_cache_mb: 256
 
   # Read-error recovery for damaged/scratched discs (Windows-only).
   # When a title fails to rip because of physical disc read errors, the app images
@@ -76,9 +79,18 @@ ripping:
     # Abort a pass when no data has been read for this long (e.g. "30m", "1h").
     # Stops a dying drive from spinning for hours. Leave empty to disable.
     timeout: "30m"
+    # Recovery time budget, as a multiple of how long the failed rip itself took.
+    # 1 means a recovered disc costs roughly twice a normal rip (imaging for as
+    # long as the rip ran, then a fast re-rip from the local image). Raise it for
+    # more thorough best-effort recovery, lower it to give up sooner.
+    max_runtime_ratio: 1
+    # Floor for that budget, so a rip that fails in the first minute still gets a
+    # usable attempt rather than a few seconds.
+    min_runtime: "10m"
     # Hard wall-clock ceiling for the whole recovery (all passes combined), e.g.
     # "90m"/"2h". Unlike `timeout` (which only bounds idle time), this stops a disc
     # that reads slowly-but-steadily through a huge bad region. Empty disables.
+    # Applied on top of the budget above, as an absolute cap.
     max_runtime: "90m"
     # Add a reverse-direction scraping pass (the 3rd pass); often recovers a few
     # extra sectors. Only runs when passes >= 3. (true/false)

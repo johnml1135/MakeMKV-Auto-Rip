@@ -1,5 +1,5 @@
 import { execFile } from "child_process";
-import { availableParallelism, cpus } from "os";
+import os, { availableParallelism, cpus } from "os";
 import path from "path";
 import { promisify } from "util";
 import fs from "fs";
@@ -169,6 +169,26 @@ export class HandBrakeService {
     return `"${value.replace(/(["\\])/g, '\\$1')}"`;
   }
 
+  /**
+   * Drop an encode to below-normal CPU priority. Encoding now overlaps the next
+   * disc's rip, and MakeMKV's demux/mux work should never queue behind a job
+   * that is happy to take an extra few minutes.
+   * @param {import('child_process').ChildProcess} [child]
+   */
+  static deprioritize(child) {
+    if (!child?.pid) {
+      return;
+    }
+
+    try {
+      os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL);
+      Logger.debug(`HandBrake running at below-normal priority (pid ${child.pid})`);
+    } catch (error) {
+      // Not fatal: the encode just runs at normal priority.
+      Logger.debug(`Could not lower HandBrake priority: ${error.message}`);
+    }
+  }
+
   static calculateTimeoutMs(fileSizeBytes) {
     const { MIN_TIMEOUT_HOURS, MAX_TIMEOUT_HOURS, TIMEOUT } = HANDBRAKE_CONSTANTS;
     const fileSizeGB = fileSizeBytes / (1024 * 1024 * 1024);
@@ -211,11 +231,14 @@ export class HandBrakeService {
           fallbackPreset
         );
 
-        const { stdout, stderr } = await execFileAsync(executable, args, {
+        const retry = execFileAsync(executable, args, {
           timeout: timeoutMs,
           maxBuffer: 1024 * 1024 * 10,
           signal,
         });
+        this.deprioritize(retry.child);
+
+        const { stdout, stderr } = await retry;
 
         this.parseHandBrakeOutput(stdout, stderr);
         await this.validateOutput(outputPath);
@@ -638,11 +661,14 @@ export class HandBrakeService {
       const conversionStart = Date.now();
       Logger.debug("Starting HandBrake encoding process...");
 
-      const { stdout, stderr } = await execFileAsync(executable, args, {
+      const conversion = execFileAsync(executable, args, {
         timeout: timeoutMs,
         maxBuffer: 1024 * 1024 * 10, // 10MB buffer for long outputs
         signal,
       });
+      this.deprioritize(conversion.child);
+
+      const { stdout, stderr } = await conversion;
 
       // Parse HandBrake output for progress and warnings
       this.parseHandBrakeOutput(stdout, stderr);

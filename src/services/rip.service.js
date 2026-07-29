@@ -9,9 +9,16 @@ import { ValidationUtils } from "../utils/validation.js";
 import { DiscService } from "./disc.service.js";
 import { DriveService } from "./drive.service.js";
 import { HandBrakeService } from "./handbrake.service.js";
-import { RecoveryService } from "./recovery.service.js";
+import {
+  RecoveryService,
+  RecoveryProgressTracker,
+  formatDuration,
+} from "./recovery.service.js";
 import { safeExit, withSystemDate, killProcessTree } from "../utils/process.js";
 import { MakeMKVMessages } from "../utils/makemkv-messages.js";
+
+/** How often to log progress during a long rip or recovery. */
+const RIP_PROGRESS_INTERVAL_MS = 60_000;
 
 /**
  * Service for handling DVD/Blu-ray ripping operations
@@ -343,9 +350,19 @@ export class RipService {
           return;
         }
 
-        const makeMKVCommand = `${makeMKVExecutable} -r mkv disc:${commandDataItem.driveNumber} ${commandDataItem.fileNumber} "${dir}"`;
+        const makeMKVCommand = [
+          makeMKVExecutable,
+          ...this.getMakeMKVReadOptions(),
+          "-r",
+          "--progress=-same",
+          `mkv disc:${commandDataItem.driveNumber}`,
+          commandDataItem.fileNumber,
+          `"${dir}"`,
+        ].join(" ");
+
         let childProcess;
         let cleanupProcess = () => {};
+        const ripStartedAtMs = Date.now();
 
         // A long disc can emit more than exec's default 1 MB of output, and
         // exceeding maxBuffer kills makemkvcon mid-rip - hence the generous cap.
@@ -388,7 +405,8 @@ export class RipService {
                 await this.attemptReadErrorRecovery(
                   combined,
                   commandDataItem,
-                  dir
+                  dir,
+                  Date.now() - ripStartedAtMs
                 );
                 await this.ejectCompletedDisc(commandDataItem);
                 resolve(commandDataItem.title);
@@ -411,7 +429,12 @@ export class RipService {
 
           try {
             await this.handleRipCompletion(stdout, commandDataItem, dir);
-            await this.attemptReadErrorRecovery(stdout, commandDataItem, dir);
+            await this.attemptReadErrorRecovery(
+              stdout,
+              commandDataItem,
+              dir,
+              Date.now() - ripStartedAtMs
+            );
             await this.ejectCompletedDisc(commandDataItem);
             resolve(commandDataItem.title);
           } catch (error) {
@@ -420,10 +443,105 @@ export class RipService {
         });
 
         cleanupProcess = this.registerRipProcess(childProcess);
+        this.reportRipProgress(childProcess, commandDataItem, ripStartedAtMs);
       } catch (error) {
         reject(error);
       }
     });
+  }
+
+  /**
+   * Drop MakeMKV's PRG* progress chatter before a log is written to disk. It is
+   * what drives the live progress messages, but thousands of lines of it would
+   * bury the messages that make a saved log worth reading.
+   * @param {string} stdout
+   * @returns {string}
+   */
+  stripProgressLines(stdout) {
+    return String(stdout ?? "")
+      .split(/\r?\n/)
+      .filter((line) => !/^PRG[VCT]:/.test(line))
+      .join("\n");
+  }
+
+  /**
+   * Global makemkvcon options that affect read throughput.
+   * @returns {string[]}
+   */
+  getMakeMKVReadOptions() {
+    const cacheMb = AppConfig.readCacheMb;
+    return cacheMb > 0 ? [`--cache=${cacheMb}`] : [];
+  }
+
+  /**
+   * Log rip progress once a minute from MakeMKV's PRGV stream, so a disc that
+   * is reading slowly is visible while it happens instead of only in hindsight.
+   * @param {import('child_process').ChildProcess} childProcess
+   * @param {Object} commandDataItem - Disc information object
+   * @param {number} startedAtMs
+   */
+  reportRipProgress(childProcess, commandDataItem, startedAtMs) {
+    if (!childProcess?.stdout) {
+      return;
+    }
+
+    let lastReportAtMs = startedAtMs;
+    let tail = "";
+
+    childProcess.stdout.on("data", (chunk) => {
+      tail = (tail + chunk.toString()).slice(-2000);
+
+      const nowMs = Date.now();
+      if (nowMs - lastReportAtMs < RIP_PROGRESS_INTERVAL_MS) {
+        return;
+      }
+
+      // PRGV:<current>,<total>,<max> - the second value tracks the whole job.
+      const matches = [...tail.matchAll(/PRGV:(\d+),(\d+),(\d+)/g)];
+      const latest = matches[matches.length - 1];
+      if (!latest) {
+        return;
+      }
+
+      const total = Number.parseInt(latest[3], 10);
+      if (!total) {
+        return;
+      }
+
+      lastReportAtMs = nowMs;
+      const percent = (Number.parseInt(latest[2], 10) / total) * 100;
+      Logger.info(
+        `Ripping ${commandDataItem.title}: ${percent.toFixed(1)}% after ${formatDuration(
+          Math.round((nowMs - startedAtMs) / 1000)
+        )}`
+      );
+    });
+  }
+
+  /**
+   * Work out how long read-error recovery may spend imaging the disc.
+   *
+   * The budget is a multiple of the rip that just failed (default 1x, so a
+   * recovered disc costs roughly twice a normal rip), clamped to a floor so a
+   * rip that failed in the first minute still gets a usable attempt, and to the
+   * configured absolute ceiling.
+   * @param {number} ripDurationMs - How long the failed rip ran
+   * @returns {number} seconds
+   */
+  getRecoveryBudgetSeconds(ripDurationMs) {
+    const recovery = AppConfig.readErrorRecovery;
+    const ceilingSec = RecoveryService.parseDurationToSeconds(recovery.maxRuntime);
+    const floorSec = RecoveryService.parseDurationToSeconds(recovery.minRuntime);
+    const ripSec = Math.max(0, Math.round((ripDurationMs || 0) / 1000));
+
+    let budget = Math.round(ripSec * (recovery.maxRuntimeRatio ?? 1));
+    budget = Math.max(budget, floorSec);
+
+    if (ceilingSec > 0) {
+      budget = Math.min(budget, ceilingSec);
+    }
+
+    return budget;
   }
 
   /**
@@ -442,7 +560,7 @@ export class RipService {
       try {
         await FileSystemUtils.writeLogFile(
           fileName,
-          stdout,
+          this.stripProgressLines(stdout),
           commandDataItem.title
         );
       } catch (error) {
@@ -519,10 +637,27 @@ export class RipService {
    * @param {Object} commandDataItem - Disc information object
    * @param {string} [knownOutputDir] - Fallback output dir from the disc rip,
    *   used when MakeMKV aborted before logging a "Saving into directory" line.
+   * @param {number} [ripDurationMs] - How long the failed rip ran, used to
+   *   budget how long recovery may spend imaging the disc.
    * @returns {Promise<void>}
    */
-  async attemptReadErrorRecovery(stdout, commandDataItem, knownOutputDir) {
+  async attemptReadErrorRecovery(
+    stdout,
+    commandDataItem,
+    knownOutputDir,
+    ripDurationMs = 0
+  ) {
     if (!AppConfig.isReadErrorRecoveryEnabled) {
+      return;
+    }
+
+    if (RecoveryService.isMediumAbsentFailure(stdout)) {
+      // The disc was pulled or the tray opened mid-rip. MakeMKV reports that as
+      // a read error, but there is nothing to image and nothing to recover.
+      Logger.warning(
+        `${commandDataItem.title}: the drive reported no disc during the rip ` +
+          "(tray opened or disc removed). Skipping read-error recovery - re-insert the disc and rip it again."
+      );
       return;
     }
 
@@ -623,17 +758,33 @@ export class RipService {
         );
       }
 
+      const budgetSec = this.getRecoveryBudgetSeconds(ripDurationMs);
+      const tracker = new RecoveryProgressTracker({
+        intervalMs: RIP_PROGRESS_INTERVAL_MS,
+        budgetSec,
+      });
+
       let recoveryCleanup = () => {};
       try {
         Logger.info(
-          `Imaging disc with ddrescue to recover read errors (this can take a while): ${imagePath}`
+          `Imaging ${commandDataItem.title} with ddrescue to recover read errors. ` +
+            `Budget ${formatDuration(budgetSec)} (the rip itself took ${formatDuration(
+              Math.round(ripDurationMs / 1000)
+            )}); progress follows every minute.`
         );
         await RecoveryService.recoverDiscToImage(
           commandDataItem.driveNumber,
           imagePath,
           {
+            maxRuntimeSeconds: budgetSec,
             onProgress: (line) =>
-            Logger.info(`[ddrescue] ${line.replace(/^ddrescue-recover:\s*/, "")}`),
+              Logger.info(`[ddrescue] ${line.replace(/^ddrescue-recover:\s*/, "")}`),
+            onStatus: (status) => {
+              const summary = tracker.update(status);
+              if (summary) {
+                Logger.info(`[ddrescue] ${commandDataItem.title}: ${summary}`);
+              }
+            },
             onChild: (child) => {
               recoveryCleanup = this.registerRipProcess(child);
             },
@@ -649,6 +800,10 @@ export class RipService {
         return;
       } finally {
         recoveryCleanup();
+        const finalSummary = tracker.finish();
+        if (finalSummary) {
+          Logger.info(`[ddrescue] ${commandDataItem.title}: ${finalSummary}`);
+        }
       }
 
       if (this.cancelRequested) {

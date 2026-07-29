@@ -140,7 +140,7 @@ export class AppConfig {
 
   /**
    * Settings for the ddrescue/MSYS2 read-error recovery flow
-   * @returns {{msys2Dir: string, devicePrefix: string, devicePath: string, workDir: string, keepImage: boolean, passes: number, retries: number, timeout: string, maxRuntime: string, reversePass: boolean, direct: boolean, resume: boolean, imageRetentionDays: number, minFreeGb: number}}
+   * @returns {{msys2Dir: string, devicePrefix: string, devicePath: string, workDir: string, keepImage: boolean, passes: number, retries: number, timeout: string, maxRuntime: string, maxRuntimeRatio: number, minRuntime: string, reversePass: boolean, direct: boolean, resume: boolean, imageRetentionDays: number, minFreeGb: number}}
    */
   static get readErrorRecovery() {
     const config = this.#loadConfig();
@@ -162,6 +162,8 @@ export class AppConfig {
       retries: nonNegInt(recovery.retries, 3),
       timeout: trimmedString(recovery.timeout, ""),
       maxRuntime: trimmedString(recovery.max_runtime, ""),
+      maxRuntimeRatio: nonNegNum(recovery.max_runtime_ratio, 1),
+      minRuntime: trimmedString(recovery.min_runtime, "10m"),
       reversePass: recovery.reverse_pass !== undefined
         ? Boolean(recovery.reverse_pass)
         : true,
@@ -170,6 +172,17 @@ export class AppConfig {
       imageRetentionDays: nonNegInt(recovery.image_retention_days, 7),
       minFreeGb: nonNegNum(recovery.min_free_gb, 10),
     };
+  }
+
+  /**
+   * MakeMKV read-cache size in MB (makemkvcon --cache). 0 leaves MakeMKV's own
+   * default in place.
+   * @returns {number}
+   */
+  static get readCacheMb() {
+    const config = this.#loadConfig();
+    const cache = config.ripping?.read_cache_mb;
+    return Number.isFinite(cache) && cache > 0 ? Math.floor(cache) : 0;
   }
 
   static get mountWaitTimeout() {
