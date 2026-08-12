@@ -255,7 +255,7 @@ export class HandBrakeService {
    */
   static async retryConversion(inputPath, outputPath, handBrakePath, retryCount = 0, options = {}) {
     const { MAX_ATTEMPTS, FALLBACK_PRESETS } = HANDBRAKE_CONSTANTS.RETRY;
-    const signal = options.signal || null;
+    const signal = options.signal ?? undefined;
 
     const inputSizeBytes = fs.statSync(inputPath).size;
     const timeoutMs = this.calculateTimeoutMs(inputSizeBytes);
@@ -656,7 +656,7 @@ export class HandBrakeService {
     let outputPath; // Declare here to be accessible in catch block
     let handBrakePath;
     let command; // Declare here to be accessible in catch block
-    const signal = options.signal || null;
+    const signal = options.signal ?? undefined;
     try {
       if (!AppConfig.handbrake?.enabled) {
         Logger.info("HandBrake post-processing is disabled, skipping...");
