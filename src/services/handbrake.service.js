@@ -273,7 +273,8 @@ export class HandBrakeService {
           handBrakePath,
           inputPath,
           outputPath,
-          fallbackPreset
+          fallbackPreset,
+          options.cpuPercent ?? null
         );
 
         const retry = execFileAsync(executable, args, {
@@ -469,7 +470,7 @@ export class HandBrakeService {
     return sanitized;
   }
 
-  static buildCommandParts(handBrakePath, inputPath, outputPath, presetOverride = null) {
+  static buildCommandParts(handBrakePath, inputPath, outputPath, presetOverride = null, cpuPercentOverride = null) {
     const config = AppConfig.handbrake;
     const preset = String(presetOverride || config.preset || '').trim();
 
@@ -495,7 +496,7 @@ export class HandBrakeService {
 
     const additionalArgs = this.mergeConfiguredThreadLimit(
       this.parseAdditionalArgs(config.additional_args || ''),
-      config.cpu_percent
+      cpuPercentOverride ?? config.cpu_percent
     );
     const hasSubtitleOverrides = this.hasOption(additionalArgs, [
       '--all-subtitles',
@@ -544,12 +545,13 @@ export class HandBrakeService {
    * @throws {HandBrakeError} If paths contain invalid characters
    * @private
    */
-  static buildCommand(handBrakePath, inputPath, outputPath, presetOverride = null) {
+  static buildCommand(handBrakePath, inputPath, outputPath, presetOverride = null, cpuPercentOverride = null) {
     const { executable, args } = this.buildCommandParts(
       handBrakePath,
       inputPath,
       outputPath,
-      presetOverride
+      presetOverride,
+      cpuPercentOverride
     );
 
     return this.formatCommand(executable, args);
@@ -650,6 +652,10 @@ export class HandBrakeService {
   /**
    * Convert an MKV file using HandBrake
    * @param {string} inputPath - Path to input MKV file
+   * @param {Object} [options] - Conversion options
+   * @param {AbortSignal} [options.signal] - Signal to cancel the encode
+   * @param {number|null} [options.cpuPercent] - Percentage of logical cores for this
+   *   encode, overriding handbrake.cpu_percent from config.yaml
    * @returns {Promise<boolean>} True if conversion was successful
    */
   static async convertFile(inputPath, options = {}) {
@@ -657,6 +663,7 @@ export class HandBrakeService {
     let handBrakePath;
     let command; // Declare here to be accessible in catch block
     const signal = options.signal ?? undefined;
+    const cpuPercent = options.cpuPercent ?? null;
     try {
       if (!AppConfig.handbrake?.enabled) {
         Logger.info("HandBrake post-processing is disabled, skipping...");
@@ -703,7 +710,13 @@ export class HandBrakeService {
       Logger.debug(`Output will be saved as: ${path.basename(outputPath)}`);
       Logger.debug("This may take a while depending on the file size and preset used.");
 
-      const { executable, args } = this.buildCommandParts(handBrakePath, inputPath, outputPath);
+      const { executable, args } = this.buildCommandParts(
+        handBrakePath,
+        inputPath,
+        outputPath,
+        null,
+        cpuPercent
+      );
       command = this.formatCommand(executable, args);
       Logger.debug(`Executing command: ${command}`);
 
@@ -782,7 +795,7 @@ export class HandBrakeService {
             outputPath,
             handBrakePath,
             0,
-            { signal }
+            { signal, cpuPercent }
           );
 
           if (retrySuccess) {
