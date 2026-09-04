@@ -5,6 +5,7 @@ import path from "path";
 import { HandBrakeService, HandBrakeError } from "../../src/services/handbrake.service.js";
 import { AppConfig } from "../../src/config/index.js";
 import { Logger } from "../../src/utils/logger.js";
+import { HANDBRAKE_CONSTANTS } from "../../src/constants/index.js";
 
 // Mock dependencies
 vi.mock("fs");
@@ -250,8 +251,41 @@ describe("HandBrakeService", () => {
       const error = new Error("ENOENT: no such file or directory");
       error.code = "ENOENT";
       stat.mockRejectedValue(error);
+      vi.spyOn(HandBrakeService, "sleep").mockResolvedValue();
 
       await expect(HandBrakeService.validateOutput("/test/output.mp4")).rejects.toThrow(/output file not created/);
+      expect(stat).toHaveBeenCalledTimes(HANDBRAKE_CONSTANTS.VALIDATION.OUTPUT_SETTLE_ATTEMPTS);
+    });
+
+    it("should accept an output file that only becomes visible after a moment", async () => {
+      // HandBrakeCLI can exit 0 just before the finished file shows up
+      const error = new Error("ENOENT: no such file or directory");
+      error.code = "ENOENT";
+      stat
+        .mockRejectedValueOnce(error)
+        .mockResolvedValue({ size: 100 * 1024 * 1024 });
+      open.mockResolvedValue({
+        read: vi.fn().mockImplementation((buffer) => {
+          Buffer.from("0000001866747970", "hex").copy(buffer);
+          return Promise.resolve({ bytesRead: 1024 });
+        }),
+        close: vi.fn().mockResolvedValue()
+      });
+      const sleepSpy = vi.spyOn(HandBrakeService, "sleep").mockResolvedValue();
+
+      await expect(HandBrakeService.validateOutput("/test/output.mp4")).resolves.not.toThrow();
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("should not wait out the settle window for non-ENOENT errors", async () => {
+      const error = new Error("EACCES: permission denied");
+      error.code = "EACCES";
+      stat.mockRejectedValue(error);
+      const sleepSpy = vi.spyOn(HandBrakeService, "sleep").mockResolvedValue();
+
+      await expect(HandBrakeService.validateOutput("/test/output.mp4")).rejects.toThrow(/Failed to access output file/);
+      expect(sleepSpy).not.toHaveBeenCalled();
+      expect(stat).toHaveBeenCalledTimes(1);
     });
 
     it("should throw error for empty file", async () => {
@@ -259,6 +293,34 @@ describe("HandBrakeService", () => {
       stat.mockResolvedValue({ size: 0 });
 
       await expect(HandBrakeService.validateOutput("/test/output.mp4")).rejects.toThrow(/output file is empty/);
+    });
+  });
+
+  describe("resolveFallbackPresets", () => {
+    it("should skip the preset that just failed", () => {
+      const presets = HandBrakeService.resolveFallbackPresets("Fast 1080p30");
+
+      expect(presets).not.toContain("Fast 1080p30");
+      expect(presets[0]).toBe("Fast 720p30");
+    });
+
+    it("should default to the configured preset", () => {
+      mockAppConfig.handbrake.preset = "Fast 720p30";
+
+      expect(HandBrakeService.resolveFallbackPresets()).not.toContain("Fast 720p30");
+    });
+
+    it("should keep every preset when the failed one is not a fallback", () => {
+      const presets = HandBrakeService.resolveFallbackPresets("Super HQ 1080p30 Surround");
+
+      expect(presets).toEqual([...HANDBRAKE_CONSTANTS.RETRY.FALLBACK_PRESETS]);
+    });
+
+    it("should offer enough distinct presets for every retry attempt", () => {
+      const presets = HandBrakeService.resolveFallbackPresets("Fast 1080p30");
+
+      expect(presets.length).toBeGreaterThanOrEqual(HANDBRAKE_CONSTANTS.RETRY.MAX_ATTEMPTS);
+      expect(new Set(presets).size).toBe(presets.length);
     });
   });
 

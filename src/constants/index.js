@@ -50,7 +50,12 @@ export const HANDBRAKE_CONSTANTS = Object.freeze({
     HEADER_BYTES: 8,
     MIN_OUTPUT_SIZE_MB: 1,
     MIN_OUTPUT_SIZE_BYTES: 1024 * 1024,
-    BUFFER_SIZE: 1024
+    BUFFER_SIZE: 1024,
+    // HandBrake can exit successfully a moment before the finished file is
+    // visible to us (virus scanners and sync clients both do this on Windows).
+    // Give it a short settle window before calling the encode a failure.
+    OUTPUT_SETTLE_ATTEMPTS: 5,
+    OUTPUT_SETTLE_DELAY_MS: 500
   }),
   TIMEOUT: Object.freeze({
     MS_PER_HOUR: 60 * 60 * 1000,

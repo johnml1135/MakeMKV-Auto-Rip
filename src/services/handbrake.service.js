@@ -245,6 +245,31 @@ export class HandBrakeService {
   }
 
   /**
+   * Sleep for the specified number of milliseconds
+   * @param {number} ms - Milliseconds to sleep
+   * @returns {Promise<void>}
+   */
+  static sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Fallback presets worth trying, minus the preset that already failed.
+   * Retrying the configured preset re-encodes the whole title with the exact
+   * same command, which costs a full encode and changes nothing.
+   * @param {string} [currentPreset] - Preset the failed attempt used
+   * @returns {string[]} Presets to try, in order
+   */
+  static resolveFallbackPresets(currentPreset = AppConfig.handbrake?.preset) {
+    const { FALLBACK_PRESETS } = HANDBRAKE_CONSTANTS.RETRY;
+    const normalize = value => String(value ?? '').trim().toLowerCase();
+    const failedPreset = normalize(currentPreset);
+    const remaining = FALLBACK_PRESETS.filter(preset => normalize(preset) !== failedPreset);
+
+    return remaining.length > 0 ? remaining : [...FALLBACK_PRESETS];
+  }
+
+  /**
    * Retry a conversion with fallback preset on failure
    * @param {string} inputPath - Path to input file
    * @param {string} outputPath - Path to output file  
@@ -254,19 +279,21 @@ export class HandBrakeService {
    * @private
    */
   static async retryConversion(inputPath, outputPath, handBrakePath, retryCount = 0, options = {}) {
-    const { MAX_ATTEMPTS, FALLBACK_PRESETS } = HANDBRAKE_CONSTANTS.RETRY;
+    const { MAX_ATTEMPTS } = HANDBRAKE_CONSTANTS.RETRY;
     const signal = options.signal ?? undefined;
 
     const inputSizeBytes = fs.statSync(inputPath).size;
     const timeoutMs = this.calculateTimeoutMs(inputSizeBytes);
+    const fallbackPresets = this.resolveFallbackPresets();
+    const maxAttempts = Math.min(MAX_ATTEMPTS, fallbackPresets.length);
 
-    for (let attempt = retryCount; attempt < MAX_ATTEMPTS; attempt++) {
+    for (let attempt = retryCount; attempt < maxAttempts; attempt++) {
       try {
         if (signal?.aborted) {
           throw this.createCancellationError();
         }
 
-        const fallbackPreset = FALLBACK_PRESETS[attempt] || FALLBACK_PRESETS[0];
+        const fallbackPreset = fallbackPresets[attempt];
         Logger.info(`Retry attempt ${attempt + 1} with preset: ${fallbackPreset}`);
 
         const { executable, args } = this.buildCommandParts(
@@ -558,6 +585,36 @@ export class HandBrakeService {
   }
 
   /**
+   * Stat the output file, tolerating a brief window where a finished encode is
+   * not yet visible. HandBrakeCLI can exit 0 moments before the file shows up,
+   * and treating that as a failed encode throws away a good encode and burns a
+   * full retry on the identical command.
+   * @param {string} outputPath - Path to the output file
+   * @returns {Promise<import('fs').Stats>}
+   * @throws {Error} The last stat error if the file never appears
+   * @private
+   */
+  static async statSettledOutput(outputPath) {
+    const { OUTPUT_SETTLE_ATTEMPTS, OUTPUT_SETTLE_DELAY_MS } = HANDBRAKE_CONSTANTS.VALIDATION;
+
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await stat(outputPath);
+      } catch (error) {
+        if (error.code !== 'ENOENT' || attempt >= OUTPUT_SETTLE_ATTEMPTS) {
+          throw error;
+        }
+
+        Logger.debug(
+          `Output file not visible yet (attempt ${attempt}/${OUTPUT_SETTLE_ATTEMPTS}), ` +
+          `waiting ${OUTPUT_SETTLE_DELAY_MS}ms...`
+        );
+        await this.sleep(OUTPUT_SETTLE_DELAY_MS);
+      }
+    }
+  }
+
+  /**
    * Validates the output file after conversion
    * @param {string} outputPath - Path to the output file
    * @throws {HandBrakeError} If validation fails
@@ -569,7 +626,7 @@ export class HandBrakeService {
     // Check if file exists using async stat
     let stats;
     try {
-      stats = await stat(outputPath);
+      stats = await this.statSettledOutput(outputPath);
     } catch (error) {
       if (error.code === 'ENOENT') {
         throw new HandBrakeError("HandBrake conversion failed - output file not created");

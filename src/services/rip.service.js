@@ -7,7 +7,6 @@ import { FileSystemUtils } from "../utils/filesystem.js";
 import { ValidationUtils } from "../utils/validation.js";
 import { DiscService } from "./disc.service.js";
 import { DriveService } from "./drive.service.js";
-import { HandBrakeService } from "./handbrake.service.js";
 import { STALL_NOTICE_SEC } from "./recovery.service.js";
 import { ReadErrorRecovery } from "./read-error-recovery.js";
 import { EncodeQueue } from "./encode-queue.js";
@@ -664,86 +663,12 @@ export class RipService {
   }
 
   /**
-   * Start the background HandBrake worker if work is queued and no worker is active
-   */
-  startHandBrakeWorker() {
-    if (
-      this.cancelRequested ||
-      !AppConfig.isHandBrakeEnabled ||
-      this.handbrakeWorkerPromise ||
-      this.pendingHandBrakeJobs.length === 0
-    ) {
-      return;
-    }
-
-    Logger.info(
-      `Starting HandBrake pipeline worker for ${this.pendingHandBrakeJobs.length} queued file(s)...`
-    );
-
-    this.handbrakeWorkerPromise = this.runHandBrakeQueue()
-      .catch((error) => {
-        this.handbrakeWorkerError = error;
-      })
-      .finally(() => {
-        this.handbrakeWorkerPromise = null;
-
-        if (!this.cancelRequested && this.pendingHandBrakeJobs.length > 0) {
-          this.startHandBrakeWorker();
-        }
-      });
-  }
-
-  /**
-   * Run queued HandBrake work sequentially while ripping can continue elsewhere
-   * @returns {Promise<void>}
-   */
-  async runHandBrakeQueue() {
-    while (this.pendingHandBrakeJobs.length > 0) {
-      this.throwIfCancelled("HandBrake processing cancelled");
-      const job = this.pendingHandBrakeJobs.shift();
-      this.activeHandBrakeJob = job;
-
-      try {
-        Logger.info(`Processing queued MKV file with HandBrake: ${job.file}`);
-        const success = await HandBrakeService.convertFile(job.fullPath, {
-          signal: this.abortController.signal,
-        });
-
-        this.throwIfCancelled("HandBrake processing cancelled");
-
-        if (success) {
-          this.goodHandBrakeArray.push(job.file);
-          Logger.info(`HandBrake processing succeeded for: ${job.file}`);
-        } else {
-          this.badHandBrakeArray.push(job.file);
-          Logger.error(`HandBrake processing failed for: ${job.file}`);
-        }
-      } catch (error) {
-        if (this.isCancellationError(error)) {
-          throw error;
-        }
-
-        this.badHandBrakeArray.push(job.file);
-        Logger.error("HandBrake post-processing error:", error.message);
-        if (error.details) {
-          Logger.error("Error details:", error.details);
-        }
-      } finally {
-        this.activeHandBrakeJob = null;
-      }
-    }
-  }
-
-  /**
    * Snapshot of the encode pipeline, for status reporting while ripping
    * continues in parallel.
    * @returns {{active: string|null, pending: number, total: number}}
    */
   getHandBrakeStatus() {
-    const active = this.activeHandBrakeJob?.file ?? null;
-    const pending = this.pendingHandBrakeJobs.length;
-
-    return { active, pending, total: pending + (active ? 1 : 0) };
+    return this.encodeQueue.status();
   }
 
   /**
@@ -752,15 +677,7 @@ export class RipService {
    * @returns {Promise<void>}
    */
   async waitForHandBrakeQueue() {
-    while (this.handbrakeWorkerPromise) {
-      await this.handbrakeWorkerPromise;
-    }
-
-    if (this.handbrakeWorkerError) {
-      const error = this.handbrakeWorkerError;
-      this.handbrakeWorkerError = null;
-      throw error;
-    }
+    await this.encodeQueue.wait();
   }
 
   /**
@@ -768,19 +685,7 @@ export class RipService {
    * @returns {Promise<void>}
    */
   async processHandBrakeQueue() {
-    if (!AppConfig.isHandBrakeEnabled) {
-      return;
-    }
-
-    this.throwIfCancelled("HandBrake processing cancelled");
-
-    if (!this.handbrakeWorkerPromise && this.pendingHandBrakeJobs.length === 0) {
-      Logger.info("No HandBrake jobs queued for processing.");
-      return;
-    }
-
-    this.startHandBrakeWorker();
-    await this.waitForHandBrakeQueue();
+    await this.encodeQueue.drain();
   }
 
   /**
@@ -833,25 +738,7 @@ export class RipService {
       return;
     }
 
-    // Display HandBrake results if HandBrake was enabled
-    if (AppConfig.isHandBrakeEnabled) {
-      if (this.goodHandBrakeArray.length > 0) {
-        Logger.info(
-          "The following files were successfully converted with HandBrake: ",
-          this.goodHandBrakeArray.join(", ")
-        );
-      }
-
-      if (this.badHandBrakeArray.length > 0) {
-        Logger.info(
-          "The following files failed HandBrake conversion: ",
-          this.badHandBrakeArray.join(", ")
-        );
-      }
-    }
-
-    this.goodHandBrakeArray = [];
-    this.badHandBrakeArray = [];
+    this.encodeQueue.reportResults();
   }
 
   /**

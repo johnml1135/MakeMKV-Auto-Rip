@@ -317,11 +317,11 @@ describe("RipService - Extended Coverage", () => {
       let releaseSecondRip;
       vi.spyOn(ripService, "ripSingleDisc")
         .mockImplementationOnce(async () => {
-          ripService.pendingHandBrakeJobs.push({
+          ripService.encodeQueue.pending.push({
             file: "movie1.mkv",
             fullPath: "/test/output/Movie1/movie1.mkv",
           });
-          ripService.startHandBrakeWorker();
+          ripService.encodeQueue.start();
           return "Movie1";
         })
         .mockImplementationOnce(
@@ -487,7 +487,7 @@ describe("RipService - Extended Coverage", () => {
   describe("processHandBrakeQueue", () => {
     beforeEach(() => {
       AppConfig.isHandBrakeEnabled = true;
-      ripService.pendingHandBrakeJobs = [
+      ripService.encodeQueue.pending = [
         { file: "movie.mkv", fullPath: "/test/output/Movie/movie.mkv" },
       ];
     });
@@ -501,14 +501,14 @@ describe("RipService - Extended Coverage", () => {
         "/test/output/Movie/movie.mkv",
         expect.objectContaining({ signal: expect.any(Object) })
       );
-      expect(ripService.goodHandBrakeArray).toContain("movie.mkv");
-      expect(ripService.pendingHandBrakeJobs).toHaveLength(0);
+      expect(ripService.encodeQueue.succeeded).toContain("movie.mkv");
+      expect(ripService.encodeQueue.pending).toHaveLength(0);
     });
 
     it("should start the background worker when jobs are queued", async () => {
       HandBrakeService.convertFile.mockResolvedValue(true);
 
-      ripService.startHandBrakeWorker();
+      ripService.encodeQueue.start();
       await ripService.processHandBrakeQueue();
 
       expect(HandBrakeService.convertFile).toHaveBeenCalledWith(
@@ -522,7 +522,7 @@ describe("RipService - Extended Coverage", () => {
 
       await ripService.processHandBrakeQueue();
 
-      expect(ripService.badHandBrakeArray).toContain("movie.mkv");
+      expect(ripService.encodeQueue.failed).toContain("movie.mkv");
       expect(Logger.error).toHaveBeenCalledWith(
         expect.stringContaining("HandBrake processing failed")
       );
@@ -535,7 +535,7 @@ describe("RipService - Extended Coverage", () => {
 
       await ripService.processHandBrakeQueue();
 
-      expect(ripService.badHandBrakeArray).toContain("movie.mkv");
+      expect(ripService.encodeQueue.failed).toContain("movie.mkv");
       expect(Logger.error).toHaveBeenCalledWith(
         "HandBrake post-processing error:",
         "HandBrake crashed"
@@ -547,7 +547,7 @@ describe("RipService - Extended Coverage", () => {
     });
 
     it("should skip processing when no jobs are queued", async () => {
-      ripService.pendingHandBrakeJobs = [];
+      ripService.encodeQueue.pending = [];
 
       await ripService.processHandBrakeQueue();
 
@@ -569,7 +569,7 @@ describe("RipService - Extended Coverage", () => {
         name: "OperationCancelledError",
         isCancelled: true,
       });
-      expect(ripService.badHandBrakeArray).toHaveLength(0);
+      expect(ripService.encodeQueue.failed).toHaveLength(0);
     });
   });
 
@@ -577,8 +577,8 @@ describe("RipService - Extended Coverage", () => {
     it("should display HandBrake results when enabled", () => {
       AppConfig.isHandBrakeEnabled = true;
       ripService.goodVideoArray = ["Movie1"];
-      ripService.goodHandBrakeArray = ["movie1.mkv"];
-      ripService.badHandBrakeArray = [];
+      ripService.encodeQueue.succeeded = ["movie1.mkv"];
+      ripService.encodeQueue.failed = [];
 
       ripService.displayResults();
 
@@ -591,7 +591,7 @@ describe("RipService - Extended Coverage", () => {
     it("should display failed HandBrake conversions", () => {
       AppConfig.isHandBrakeEnabled = true;
       ripService.goodVideoArray = ["Movie1"];
-      ripService.badHandBrakeArray = ["movie1.mkv"];
+      ripService.encodeQueue.failed = ["movie1.mkv"];
 
       ripService.displayResults();
 
@@ -604,21 +604,21 @@ describe("RipService - Extended Coverage", () => {
     it("should reset arrays after displaying", () => {
       ripService.goodVideoArray = ["Movie1"];
       ripService.badVideoArray = ["Movie2"];
-      ripService.goodHandBrakeArray = ["movie1.mkv"];
-      ripService.badHandBrakeArray = ["movie2.mkv"];
+      ripService.encodeQueue.succeeded = ["movie1.mkv"];
+      ripService.encodeQueue.failed = ["movie2.mkv"];
 
       ripService.displayResults();
 
       expect(ripService.goodVideoArray).toHaveLength(0);
       expect(ripService.badVideoArray).toHaveLength(0);
-      expect(ripService.goodHandBrakeArray).toHaveLength(0);
-      expect(ripService.badHandBrakeArray).toHaveLength(0);
+      expect(ripService.encodeQueue.succeeded).toHaveLength(0);
+      expect(ripService.encodeQueue.failed).toHaveLength(0);
     });
 
     it("should not display HandBrake results when disabled", () => {
       AppConfig.isHandBrakeEnabled = false;
       ripService.goodVideoArray = ["Movie1"];
-      ripService.goodHandBrakeArray = ["movie1.mkv"];
+      ripService.encodeQueue.succeeded = ["movie1.mkv"];
 
       ripService.displayResults();
 
