@@ -30,6 +30,28 @@ export class EncodeQueue {
     this.failed = [];
   }
 
+  /**
+   * A queue that no rip can cancel. The web server keeps one for its whole
+   * lifetime, so stopping rip mode, saving the config or loading the next disc
+   * never throws away encodes that are already queued.
+   * @returns {EncodeQueue}
+   */
+  static detached() {
+    return new EncodeQueue({
+      cancellation: {
+        isCancelled: () => false,
+        createError: (message = "HandBrake processing cancelled") => {
+          const error = new Error(message);
+          error.name = "OperationCancelledError";
+          error.isCancelled = true;
+          return error;
+        },
+        isCancellationError: (error) => error?.isCancelled === true,
+        getSignal: () => undefined,
+      },
+    });
+  }
+
   /** @returns {boolean} */
   get cancelRequested() {
     return this.cancellation.isCancelled();
@@ -47,7 +69,14 @@ export class EncodeQueue {
     }
 
     for (const file of files) {
-      this.pending.push({ file, fullPath: path.join(outputFolder, file) });
+      const fullPath = path.join(outputFolder, file);
+      // A folder can be offered twice (the startup scan, then the rip that
+      // finishes it); encoding the same file twice would race on its output.
+      if (this.#isQueued(fullPath)) {
+        continue;
+      }
+
+      this.pending.push({ file, fullPath });
       Logger.info(`Queued ${label} for HandBrake processing: ${file}`);
     }
 
@@ -207,6 +236,23 @@ export class EncodeQueue {
 
     this.succeeded = [];
     this.failed = [];
+  }
+
+  /**
+   * @param {string} fullPath
+   * @returns {boolean} Whether the file is already waiting or being encoded
+   */
+  #isQueued(fullPath) {
+    const normalize = (file) => {
+      const resolved = path.resolve(file);
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    };
+    const key = normalize(fullPath);
+    const matches = (job) => normalize(job.fullPath) === key;
+    return (
+      (this.active !== null && matches(this.active)) ||
+      this.pending.some(matches)
+    );
   }
 
   /**

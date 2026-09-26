@@ -163,6 +163,7 @@ describe("api routes rip mode", () => {
     expect(ripServiceCtorMock).toHaveBeenCalledWith({
       exitOnCriticalError: false,
       backgroundHandBrake: true,
+      encodeQueue: expect.any(Object),
     });
 
     await vi.waitFor(() => {

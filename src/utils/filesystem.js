@@ -1,5 +1,5 @@
 import fs from "fs";
-import { join } from "path";
+import path, { join } from "path";
 import { Logger } from "./logger.js";
 import { PLATFORM_DEFAULTS } from "../constants/index.js";
 import { access, readdir } from "fs/promises";
@@ -64,6 +64,101 @@ export class FileSystemUtils {
       Logger.error(`Error reading directory ${dirPath}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * List the MKV files in a folder, walking subfolders unless told not to.
+   * Directory symlinks are not followed, so a link loop cannot hang the walk.
+   * @param {string} folder - Absolute path to search
+   * @param {boolean} [recurse] - Whether to descend into subfolders
+   * @returns {string[]} Absolute paths, alphabetical, each folder's own files before
+   *   the contents of its subfolders
+   */
+  static collectMkvFiles(folder, recurse = true) {
+    const found = [];
+
+    const walk = (dir) => {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch (error) {
+        Logger.warning(`Skipping unreadable folder ${dir}: ${error.message || error}`);
+        return;
+      }
+
+      entries.sort((a, b) => a.name.localeCompare(b.name));
+
+      const subfolders = [];
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          subfolders.push(full);
+        } else if (entry.name.toLowerCase().endsWith(".mkv")) {
+          found.push(full);
+        }
+      }
+
+      if (recurse) {
+        subfolders.forEach(walk);
+      }
+    };
+
+    walk(folder);
+    return found;
+  }
+
+  /**
+   * MKV files under the rips folder that are ready for HandBrake: left over by
+   * an encode that never ran, was interrupted, or failed. With delete_original
+   * on, a converted MKV is deleted, so any MKV still here is unconverted.
+   *
+   * Empty files (a rip that died at once) and recently written ones (possibly
+   * still being written by MakeMKV) are skipped.
+   * @param {string} folder - Rips folder to search, subfolders included
+   * @param {Object} [options]
+   * @param {number} [options.minAgeMs=120000] - How long a file must have gone
+   *   unmodified before it counts as finished
+   * @param {number} [options.now=Date.now()]
+   * @param {string|null} [options.skipIfConvertedTo] - Output extension (e.g.
+   *   "mp4"). When set, an MKV with that output beside it counts as converted.
+   *   Needed when originals are kept, or every restart would re-encode them.
+   * @returns {string[]} Absolute paths
+   */
+  static findUnconvertedMkvFiles(
+    folder,
+    { minAgeMs = 120000, now = Date.now(), skipIfConvertedTo = null } = {}
+  ) {
+    if (!fs.existsSync(folder)) {
+      return [];
+    }
+
+    return FileSystemUtils.collectMkvFiles(folder).filter((file) => {
+      let stats;
+      try {
+        stats = fs.statSync(file);
+      } catch {
+        return false;
+      }
+
+      if (stats.size === 0) {
+        Logger.warning(`Skipping empty MKV file (failed rip?): ${file}`);
+        return false;
+      }
+
+      if (now - stats.mtimeMs < minAgeMs) {
+        Logger.info(`Skipping MKV file that is still being written: ${file}`);
+        return false;
+      }
+
+      if (skipIfConvertedTo) {
+        const output = file.replace(/\.mkv$/i, `.${skipIfConvertedTo}`);
+        if (fs.existsSync(output)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
   }
 
   /**

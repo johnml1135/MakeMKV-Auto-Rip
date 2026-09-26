@@ -12,6 +12,8 @@ import { prepareRipRuntime } from "../../app.js";
 import { DiscService } from "../../services/disc.service.js";
 import { DriveService } from "../../services/drive.service.js";
 import { RipService } from "../../services/rip.service.js";
+import { EncodeQueue } from "../../services/encode-queue.js";
+import { FileSystemUtils } from "../../utils/filesystem.js";
 import { Logger } from "../../utils/logger.js";
 import {
   broadcastStatusUpdate,
@@ -25,9 +27,12 @@ let currentOperation = null;
 let operationStatus = "idle"; // idle, loading, ejecting, ripping
 let currentOperationPromise = null;
 let activeWebLoggerSinkCleanup = null;
-// One RipService for the whole rip-mode session, so its HandBrake queue can
-// keep encoding across disc changes instead of being thrown away each cycle.
+// One RipService per rip-mode session.
 let ripSession = null;
+// One HandBrake queue for the life of the server. It is shared by every rip
+// session, so stopping rip mode, saving the config or swapping discs never
+// throws away an encode; leftovers from a previous run are queued at startup.
+const encodeQueue = EncodeQueue.detached();
 let ripModeEnabled = false;
 let ripModeLoop = null;
 
@@ -114,6 +119,7 @@ function ensureRipSession() {
       // so waiting for HandBrake here would leave the drive idle (and the loop
       // blind to disc changes) for the length of an encode.
       backgroundHandBrake: true,
+      encodeQueue,
     });
   }
 
@@ -179,7 +185,7 @@ async function detectDiscsForRipMode() {
 }
 
 function describeBackgroundEncoding() {
-  const status = ripSession?.getHandBrakeStatus();
+  const status = encodeQueue.status();
   if (!status?.total) {
     return "";
   }
@@ -307,13 +313,11 @@ function ensureRipModeLoop() {
     } finally {
       ripModeLoop = null;
 
-      // Background encoding belongs to the session, so it ends with it.
+      // The encode queue belongs to the server, not the session, so it keeps
+      // working after rip mode stops.
       const finishedSession = ripSession;
       ripSession = null;
-      if (finishedSession) {
-        finishedSession.requestCancel();
-        await finishedSession.waitForHandBrakeQueue().catch(() => {});
-      }
+      finishedSession?.requestCancel();
 
       detachWebLoggerSink();
 
@@ -329,9 +333,9 @@ function ensureRipModeLoop() {
 function stopCurrentOperation(message) {
   ripModeEnabled = false;
 
-  // Cancels the in-flight rip and any background encode. Safe to call while the
-  // loop is only waiting for a disc: it just marks the session cancelled.
-  const encoding = ripSession?.getHandBrakeStatus();
+  // Cancels the in-flight rip. Safe to call while the loop is only waiting for
+  // a disc: it just marks the session cancelled. Encoding carries on.
+  const encoding = encodeQueue.status();
   ripSession?.requestCancel();
 
   if (currentOperationPromise) {
@@ -346,7 +350,7 @@ function stopCurrentOperation(message) {
   if (encoding?.total) {
     broadcastLogMessage(
       "warn",
-      `Cancelled ${encoding.total} in-progress/queued HandBrake encode(s). The ripped MKV files were kept.`
+      `HandBrake keeps encoding ${encoding.total} in-progress/queued file(s) in the background.`
     );
   }
 }
@@ -678,4 +682,39 @@ router.post("/rip/start", async (req, res) => {
   }
 });
 
-export { router as apiRoutes, applyConfigToYaml };
+/**
+ * Queue every MKV left in the rips folder that was never converted - because
+ * the server stopped mid-encode, or the encode failed - so a restart finishes
+ * the job.
+ * @returns {number} How many files were found
+ */
+function queueUnconvertedFiles() {
+  if (!AppConfig.isHandBrakeEnabled) {
+    return 0;
+  }
+
+  const { delete_original, output_format } = AppConfig.handbrake;
+  const files = FileSystemUtils.findUnconvertedMkvFiles(AppConfig.movieRipsDir, {
+    skipIfConvertedTo: delete_original ? null : output_format.toLowerCase(),
+  });
+  if (files.length === 0) {
+    Logger.info("No unconverted MKV files found.");
+    return 0;
+  }
+
+  Logger.info(`Found ${files.length} unconverted MKV file(s); queueing them for HandBrake.`);
+
+  const byFolder = new Map();
+  for (const file of files) {
+    const folder = path.dirname(file);
+    byFolder.set(folder, [...(byFolder.get(folder) ?? []), path.basename(file)]);
+  }
+
+  for (const [folder, names] of byFolder) {
+    encodeQueue.add(names, folder, "unconverted MKV file");
+  }
+
+  return files.length;
+}
+
+export { router as apiRoutes, applyConfigToYaml, queueUnconvertedFiles };

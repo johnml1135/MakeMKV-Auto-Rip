@@ -27,6 +27,10 @@ export class RipService {
    *   encoding after `startRipping()` resolves instead of blocking on the queue.
    *   Used by rip mode so the next disc can be ripped while the previous one is
    *   still encoding.
+   * @param {import("./encode-queue.js").EncodeQueue} [options.encodeQueue] - A
+   *   queue that outlives this service (the web server's). Cancelling a rip then
+   *   leaves its encodes alone; without one the service owns a private queue
+   *   that is cancelled with the rip.
    */
   constructor(options = {}) {
     this.goodVideoArray = [];
@@ -41,7 +45,8 @@ export class RipService {
     // Encoding and damaged-disc salvage are their own workflows. Both need this
     // service's cancellation and nothing else from it.
     const cancellation = this.#cancellationSeam();
-    this.encodeQueue = new EncodeQueue({ cancellation });
+    this.ownsEncodeQueue = !options.encodeQueue;
+    this.encodeQueue = options.encodeQueue ?? new EncodeQueue({ cancellation });
     this.readErrorRecovery = new ReadErrorRecovery({
       cancellation,
       onRecoveredFiles: (files, outputFolder) =>
@@ -115,7 +120,9 @@ export class RipService {
 
     this.cancelRequested = true;
     this.runCancelled = true;
-    this.encodeQueue.clear();
+    if (this.ownsEncodeQueue) {
+      this.encodeQueue.clear();
+    }
 
     if (!this.abortController.signal.aborted) {
       this.abortController.abort(this.createCancellationError());
