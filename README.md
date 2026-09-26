@@ -26,6 +26,7 @@ Automatically rips DVDs and Blu-ray discs using the MakeMKV console and saves th
 - **🔄 HandBrake integration** - Optional post-processing to convert MKV files to more efficient formats
 - **🎯 Compression presets** - Use HandBrake's optimized presets for the perfect balance of quality and size
 - **🗑️ Automatic cleanup** - Optional removal of original MKV files after successful conversion
+- **♻️ Resumable encoding** - Encodes keep running while the next disc rips, and the web UI finishes any leftover conversions on startup
 
 ## 🚀 Quick Start
 
@@ -397,6 +398,43 @@ When HandBrake conversion fails, the system automatically implements an intellig
 - Errors are logged with detailed information for troubleshooting
 - Ripping workflow continues normally (conversion failure doesn't stop disc ejection)
 - Partial/incomplete output files are automatically cleaned up
+
+### Background Encoding & Resuming
+
+In the web UI's rip mode, each disc is ejected as soon as it is ripped and its
+titles join a single HandBrake queue that encodes one file at a time, at
+below-normal priority, while the next disc rips.
+
+- **The queue belongs to the web server, not the rip.** Loading a new disc,
+  pressing **Stop**, or saving the configuration stops ripping only; queued
+  encodes keep going until the queue is empty.
+- **Leftovers are picked up on startup.** `npm run web` scans `movie_rips_dir`
+  (subfolders included) for MKV files that were never converted - for example
+  because the server was closed mid-encode or a conversion failed - and queues
+  them. An interrupted encode starts again from the beginning.
+- The startup scan skips empty MKV files (failed rips) and files modified in
+  the last two minutes (possibly still being written by MakeMKV). With
+  `delete_original: false`, an MKV that already has its `.mp4`/`.m4v` beside it
+  counts as converted, so restarts do not re-encode it.
+- To stop an encode in progress, stop the web server. The MKV is kept and is
+  converted the next time the server starts.
+
+### Converting a Folder Manually
+
+To convert MKV files without ripping (e.g. files copied from elsewhere), run
+the folder script. It uses the same `handbrake` settings from `config.yaml`:
+
+```bash
+node scripts/handbrake-convert-folder.js <folder> [--cpu-percent=N] [--no-recurse]
+```
+
+- `<folder>` - Folder to convert, subfolders included. Absolute paths on other
+  drives and UNC shares (e.g. `\\nas\media`) work too.
+- `--cpu-percent=N` - Share of logical cores for this run (1-100, default 75)
+- `--no-recurse` - Only convert MKV files directly in the folder
+
+Don't point it at a folder the web server is already encoding; two encoders
+working on the same file would clash.
 
 **Common Issues & Solutions:**
 
